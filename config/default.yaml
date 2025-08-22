@@ -1,0 +1,59 @@
+paths:
+  root: "{root}"
+  raw_dir: "{root}/data_raw"          # hier legst du die Quell-Dateien in Drive ab
+  clean_dir: "{root}/data_clean"      # hier landen events.csv / event_actor.csv
+  edges: "{root}/data_derived/edges_person.csv"
+  persons: "{root}/data_derived/persons.csv"
+  levels: "{root}/data_derived/infomap_levels.csv"
+  edges_prepared: "{root}/data_derived/edges_person_prepared.csv"
+  persons: "{root}/data_derived/persons.csv" 
+
+ingest:
+  input_subdir: "sample"              # relativ zu paths.raw_dir (z.B. "enron_mbox" o.ä.)
+  progress_every: 500
+  keep_body_text: false               # ggf. auf true setzen; Achtung: Datenschutz
+  body_text_max_chars: 5000           # Trunkierung, falls keep_body_text=true
+
+
+filters:
+  internal:
+    mode: "outside_supernode"   # include | outside_supernode | exclude
+    domains: ["@enron.com"]
+    outside_label: "Outside world"
+    allow_external_leaders: false
+  edges:
+    min_weight: 1
+    require_reciprocal: false
+  subgraph:
+    seed_emails: []             # z.B. ["ceo@enron.com"]
+    hops: 0
+
+selection:
+  mode: "coverage"
+  coverage:
+    L1: 0.80
+    L2: 0.80
+    L3: 0.70
+
+thresholds:
+  min_size_fallback:
+    L1: 5
+    L2: 5
+    L3: 5
+  pct_exec: 99.9
+  pct_l1: 99.0
+  pct_l2: 99.0
+  pct_l3: 98.0
+  z_min_l3_for_plot: 0.0
+  n_execs: 8      # wie viele globale Execs (höchstes Global-Degree)
+
+runtime:
+  random_seed: 42
+  bt_sample_cap: 2000
+
+outputs:
+  cutoffs_dir: "{root}/reports/cutoffs"
+  signif_dir:  "{root}/reports/significance"
+  org_dir:     "{root}/reports/orgchart"
+  topics_dir:  "{root}/reports/topics"
+  diagnostics_dir: "{root}/reports/diagnostics"

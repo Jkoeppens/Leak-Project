@@ -1,0 +1,15 @@
+# Local config
+config/local.yaml
+
+# Data (raw & outputs)
+data_raw/
+data_clean/
+data_derived/
+reports/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
