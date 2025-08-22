@@ -1,7 +1,7 @@
 # pipe/orgchart_html.py
 from __future__ import annotations
+
 from pathlib import Path
-from typing import Iterable, Optional, Dict, Any
 import numpy as np
 import pandas as pd
 from pyvis.network import Network
