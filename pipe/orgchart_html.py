@@ -7,27 +7,31 @@ import pandas as pd
 from pyvis.network import Network
 
 def _esc(s: str) -> str:
-    if s is None: return "-"
+    if s is None:
+        return "-"
     return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
-def _name_map(persons: pd.DataFrame|None) -> dict[str,str]:
-    if persons is None or persons.empty: return {}
+def _name_map(persons: pd.DataFrame | None) -> dict[str, str]:
+    if persons is None or persons.empty:
+        return {}
     pid = None
     for c in persons.columns:
-        if c in ("person_id","node","email"):
-            pid = c; break
-    if not pid: return {}
+        if c in ("person_id", "node", "email"):
+            pid = c
+            break
+    if not pid:
+        return {}
     nm = "name" if "name" in persons.columns else pid
     return dict(zip(persons[pid].astype(str), persons[nm].astype(str)))
 
-def _sizes_per_level(H: pd.DataFrame, levels: list[str]) -> dict[str, dict[int,int]]:
+def _sizes_per_level(H: pd.DataFrame, levels: list[str]) -> dict[str, dict[int, int]]:
     return {lv: H[lv].value_counts().astype(int).to_dict() for lv in levels}
 
-def _colors_for(levels: list[str]) -> dict[str,str]:
+def _colors_for(levels: list[str]) -> dict[str, str]:
     base = ["#1f77b4","#2ca02c","#9467bd","#8c564b","#17becf","#bcbd22","#e377c2","#7f7f7f"]
-    colors = {"EXEC":"#ff7f0e"}
+    colors = {"EXEC": "#ff7f0e"}
     for i, lv in enumerate(levels, start=1):
-        colors[lv] = base[(i-1) % len(base)]
+        colors[lv] = base[(i - 1) % len(base)]
     return colors
 
 def _prune_selection(selection: dict, max_levels: list[str]) -> dict:
@@ -41,10 +45,10 @@ def _prune_selection(selection: dict, max_levels: list[str]) -> dict:
     new_children, visible = {}, {lv: set() for lv in max_levels}
     visible[max_levels[0]] = set(map(int, sel["keep"].get(max_levels[0], [])))
     for d in range(1, len(max_levels)):
-        parent_lv, child_lv = max_levels[d-1], max_levels[d]
+        parent_lv, child_lv = max_levels[d - 1], max_levels[d]
         cmap = children.get(child_lv, {})
         filtered = {}
-        for p, kids in cmap.items():
+        for p, kids in (cmap or {}).items():
             if int(p) in visible[parent_lv]:
                 filtered[str(p)] = kids
         new_children[child_lv] = filtered
@@ -59,21 +63,21 @@ def build_org_html(
     selection: dict,
     leaders: dict,
     H: pd.DataFrame,
-    persons: pd.DataFrame|None = None,
+    persons: pd.DataFrame | None = None,
     out_html: str = "organigram_interaktiv.html",
     max_depth: int = 3,
-    z_by_level: dict|None = None,
-    topics_by_level: dict|None = None,
+    z_by_level: dict | None = None,
+    topics_by_level: dict | None = None,
     physics: bool = False,
     label_template: str = "{level}:{cid} • {leader} • n={n} • z={z:.1f} • k_in={deg_in} • k={deg_global}",
-    label_size: int = 18
+    label_size: int = 18,
 ) -> str:
     """Erzeugt ein interaktives Orgchart als HTML (PyVis)."""
 
     if "node" not in H.columns:
-        for cand in ("person_id","email","node"):
+        for cand in ("person_id", "email", "node"):
             if cand in H.columns:
-                H = H.rename(columns={cand:"node"})
+                H = H.rename(columns={cand: "node"})
                 break
     H["node"] = H["node"].astype(str)
 
@@ -146,16 +150,16 @@ def build_org_html(
                                       z=float('nan'), n=sz, deg_in=din, deg_global=dgl)
         tip = (f"<b>{L1} {l1}</b><br/>Persons: {sz}<br/>Leader: {_esc(lead_nm) if lead_nm else '–'}"
                f"<br/>k_in={'' if np.isnan(din) else int(din)} · k={'' if np.isnan(dgl) else int(dgl)}")
-        val = min(90, 15 + int(np.sqrt(max(sz,1))))
+        val = min(90, 15 + int(np.sqrt(max(sz, 1))))
         net.add_node(n1, label=label, level=1, color=COLORS[L1], value=val, title=tip)
         if exec_ids:
-            net.add_edge(exec_ids[idx % len(exec_ids)], n1)
+            net.add_edge(exec_ids[idx % len(execs or [1])], n1)
 
     # tiefere Ebenen
     for depth in range(1, len(levels)):
-        parent_lv = levels[depth-1]
+        parent_lv = levels[depth - 1]
         child_lv  = levels[depth]
-        cmap = selection.get("children", {}).get(child_lv, {})
+        cmap = selection.get("children", {}).get(child_lv, {}) or {}
         for parent_id, child_ids in cmap.items():
             pnode = f"{parent_lv}:{int(parent_id)}"
             for cid in child_ids:
@@ -167,29 +171,17 @@ def build_org_html(
                 din     = rec.get("deg_in", np.nan)
                 dgl     = rec.get("deg_global", np.nan)
                 lead_nm = nmap.get(lead_id, lead_id)
-                z = (z_by_level or {}).get(child_lv, {}).get(cid, None)
-                z_for_label = (z if z is not None and np.isfinite(z) else float('nan'))
+                z = (zmap.get(child_lv, {}) if zmap else {}).get(cid, None)
+                z_for_label = (z if z is not None and np.isfinite(z) else float("nan"))
                 label = label_template.format(level=child_lv, cid=cid, leader=(lead_nm or "–"),
                                               z=z_for_label, n=sz, deg_in=din, deg_global=dgl)
                 tip = (f"<b>{child_lv} {cid}</b><br/>Persons: {sz}<br/>Leader: {_esc(lead_nm) if lead_nm else '–'}"
                        f"{'<br/>z-score: %.1f' % z if (z is not None and np.isfinite(z)) else ''}"
                        f"<br/>k_in={'' if np.isnan(din) else int(din)} · k={'' if np.isnan(dgl) else int(dgl)}")
-                val = min(85, 12 + int(np.sqrt(max(sz,1))))
-                net.add_node(cnode, label=label, level=depth+1, color=COLORS[child_lv], value=val, title=tip)
+                val = min(85, 12 + int(np.sqrt(max(sz, 1))))
+                net.add_node(cnode, label=label, level=depth + 1, color=COLORS[child_lv], value=val, title=tip)
                 net.add_edge(pnode, cnode)
 
     Path(out_html).parent.mkdir(parents=True, exist_ok=True)
     net.write_html(out_html, notebook=False, open_browser=False)
     return out_html
-
-    # pipe/persons.py (optional)
-from __future__ import annotations
-from pathlib import Path
-import pandas as pd
-
-def ensure_persons(cfg: dict) -> pd.DataFrame:
-    p = cfg["paths"].get("persons")
-    if not p: return pd.DataFrame()
-    path = Path(p)
-    if not path.exists(): return pd.DataFrame()
-    return pd.read_csv(path)
