@@ -146,8 +146,10 @@ def build_org_html(
         din     = rec.get("deg_in", np.nan)
         dgl     = rec.get("deg_global", np.nan)
         lead_nm = nmap.get(lead_id, lead_id)
+        topics_txt = (tmap.get(L1, {}) or {}).get(l1, "")
         label = label_template.format(level=L1, cid=l1, leader=(lead_nm or "–"),
-                                      z=float('nan'), n=sz, deg_in=din, deg_global=dgl)
+                                      z=float('nan'), n=sz, deg_in=din, deg_global=dgl,
+                                      topics=topics_txt)
         tip = (f"<b>{L1} {l1}</b><br/>Persons: {sz}<br/>Leader: {_esc(lead_nm) if lead_nm else '–'}"
                f"<br/>k_in={'' if np.isnan(din) else int(din)} · k={'' if np.isnan(dgl) else int(dgl)}")
         val = min(90, 15 + int(np.sqrt(max(sz, 1))))
