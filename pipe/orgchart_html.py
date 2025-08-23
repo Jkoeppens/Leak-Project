@@ -151,7 +151,8 @@ def build_org_html(
                                       z=float('nan'), n=sz, deg_in=din, deg_global=dgl,
                                       topics=topics_txt)
         tip = (f"<b>{L1} {l1}</b><br/>Persons: {sz}<br/>Leader: {_esc(lead_nm) if lead_nm else '–'}"
-               f"<br/>k_in={'' if np.isnan(din) else int(din)} · k={'' if np.isnan(dgl) else int(dgl)}")
+               f"<br/>k_in={'' if np.isnan(din) else int(din)} · k={'' if np.isnan(dgl) else int(dgl)}"
+                f"<br/>Topics: {_esc(topics_txt) if topics_txt else '–'}")
         val = min(90, 15 + int(np.sqrt(max(sz, 1))))
         net.add_node(n1, label=label, level=1, color=COLORS[L1], value=val, title=tip)
         if exec_ids:
@@ -175,11 +176,14 @@ def build_org_html(
                 lead_nm = nmap.get(lead_id, lead_id)
                 z = (zmap.get(child_lv, {}) if zmap else {}).get(cid, None)
                 z_for_label = (z if z is not None and np.isfinite(z) else float("nan"))
+                topics_txt = (tmap.get(child_lv, {}) or {}).get(cid, "")
                 label = label_template.format(level=child_lv, cid=cid, leader=(lead_nm or "–"),
-                                              z=z_for_label, n=sz, deg_in=din, deg_global=dgl)
+                                              z=z_for_label, n=sz, deg_in=din, deg_global=dgl,
+                                              topics=topics_txt)
                 tip = (f"<b>{child_lv} {cid}</b><br/>Persons: {sz}<br/>Leader: {_esc(lead_nm) if lead_nm else '–'}"
                        f"{'<br/>z-score: %.1f' % z if (z is not None and np.isfinite(z)) else ''}"
-                       f"<br/>k_in={'' if np.isnan(din) else int(din)} · k={'' if np.isnan(dgl) else int(dgl)}")
+                       f"<br/>k_in={'' if np.isnan(din) else int(din)} · k={'' if np.isnan(dgl) else int(dgl)}"
+                       f"<br/>Topics: {_esc(topics_txt) if topics_txt else '–'}")
                 val = min(85, 12 + int(np.sqrt(max(sz, 1))))
                 net.add_node(cnode, label=label, level=depth + 1, color=COLORS[child_lv], value=val, title=tip)
                 net.add_edge(pnode, cnode)
