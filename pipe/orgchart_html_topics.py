@@ -1,47 +1,43 @@
 """
-Orgchart renderer with topic overlays and per-cluster topic summaries (inline + optional pie tooltip).
+Orgchart renderer with topic overlays and per-cluster topic summaries.
 
-Drop-in replacement / superset for prior `build_org_html`:
-
-build_org_html(
-    selection: dict,                 # hierarchical selection (levels -> clusters with children)
-    leaders: dict | None,            # {(level, cid) -> {"leader": name, ...}} or similar
-    H: "pd.DataFrame",               # nodes-to-clusters mapping with level_1..level_k columns
-    persons: "pd.DataFrame | None" = None,
-    out_html: str = "organigram_interaktiv.html",
-    max_depth: int = 3,
-    z_by_level: dict | None = None,  # {"L1": {cid: z, ...}, ...}
-    topics_by_level: dict | None = None,  # {"L2": {cid: [(label, weight), ...]}, ...}
-    physics: bool = False,
-    label_template: str = "{level}:{cid} • {leader} • n={n} • z={z:.1f} • {topics}",
-    label_size: int = 18,
-    extra_edges: list | None = None, # [{level:"L2", src:cid, dst:cid, width:..., color:..., label:..., arrows:"to", dashes:True, smooth:True}, ...]
-    E: "pd.DataFrame | None" = None, # optional original edges to compute deg stats (best-effort)
-    pie_in_tooltip: bool = False,    # if True, render per-cluster topic mix as an inline base64 PNG pie chart
-) -> str
-
-Assumptions about `selection` structure (common in prior notebooks):
-- selection is a dict keyed by levels like "L1", "L2", ... each containing a list of cluster dicts
-- each cluster dict: {"cid": int, "keep": bool (optional, default True), "children": [child cluster dicts at next level], ...}
-
-If your selection differs, you can adapt `_iter_selection()` accordingly.
+Public API:
+    build_org_html(
+        selection: dict,                 # {"L1":[{cid, children:[...]}], "L2":[...], ...}
+        leaders: dict | None,            # {(lv, cid)->"Name"} oder {(lv,cid)->{"leader":...}}
+        H: "pd.DataFrame",               # DataFrame mit level_1..level_k Spalten (für n je Cluster)
+        persons: "pd.DataFrame | None" = None,
+        out_html: str = "organigram_interaktiv.html",
+        max_depth: int = 5,
+        z_by_level: dict | None = None,  # {"Lx": {cid->z}}
+        topics_by_level: dict | None = None,  # {"Lx": {cid: [(label, weight), ...]}, ...}
+        physics: bool = False,
+        label_template: str = "{level}:{cid} • n={n} • {topics}",
+        label_size: int = 16,
+        extra_edges: list | None = None, # [{level:"L2", src:cid, dst:cid, width:..., color:..., label:..., arrows:"to", dashes:True, smooth:True}, ...]
+        E: "pd.DataFrame | None" = None,
+        pie_in_tooltip: bool = True,
+        debug: bool = True
+    ) -> str
 """
+
 from __future__ import annotations
 
 import io
+import json
 import base64
-from dataclasses import dataclass
 from typing import Dict, Tuple, Iterable, List, Any
 
-# Third-party
+# Third-party (optional pandas)
 try:
     import pandas as pd
-except Exception as e:  # pragma: no cover
+except Exception:
     pd = None
 
 from pyvis.network import Network
 
-# ------------------------- helpers -------------------------
+
+# --------------------- small utils ---------------------
 
 def _esc(s: Any) -> str:
     if s is None:
@@ -52,15 +48,12 @@ def _esc(s: Any) -> str:
             .replace(">", "&gt;")
             )
 
-
 def _topics_inline_summary(items: List[Tuple[str, float]] | None, k: int = 3) -> str:
     if not items:
         return "–"
-    # normalize and take top-k
     s = float(sum(max(0.0, float(w)) for _, w in items)) or 1.0
-    top = sorted(items, key=lambda t: t[1], reverse=True)[:k]
+    top = sorted(items, key=lambda t: float(t[1]), reverse=True)[:k]
     return " / ".join(f"{lab} {int(100*float(w)/s + 0.5)}%" for lab, w in top)
-
 
 def _pie_png_base64(items: List[Tuple[str, float]] | None, size_px: int = 120) -> str | None:
     if not items:
@@ -74,43 +67,38 @@ def _pie_png_base64(items: List[Tuple[str, float]] | None, size_px: int = 120) -
     vals = [max(0.0, float(w)) for _, w in items]
     if not any(v > 0 for v in vals):
         return None
-    labels = [str(l) for l, _ in items]
     fig, ax = plt.subplots(figsize=(size_px/100.0, size_px/100.0), dpi=100)
     ax.pie(vals, labels=None, startangle=90)
-    ax.axis('equal')
+    ax.axis("equal")
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
+def _lv_key_from_str_cluster(cid: Any) -> str:
+    s = str(cid)
+    return f"L{s.count(':')+1}"
+
 
 # --------------------- selection traversal ---------------------
 
 def _level_keys(selection: dict) -> List[str]:
-    # Return sorted level keys as ["L1", "L2", ...]
-    ks = [k for k in selection.keys() if k and (k[0].lower()=="l")]
+    ks = [k for k in selection.keys() if k and (str(k)[0].lower() == "l")]
     try:
         ks = sorted(ks, key=lambda k: int(str(k).lower().replace("l", "")))
     except Exception:
         ks = sorted(ks)
     return ks
 
-
-def _iter_selection(selection: dict, max_depth: int | None = None) -> Iterable[Tuple[str, dict, str | None, int | None]]:
-    """Yield (level_key, cluster_dict, parent_level_key, parent_cid) in hierarchical order.
-    Expects each cluster_dict to possibly include 'children' list for the next level.
-    """
+def _iter_selection(selection: dict, max_depth: int | None = None) -> Iterable[Tuple[str, dict, str | None, Any | None]]:
+    """Yield (level_key, cluster_dict, parent_level_key, parent_cid) in hierarchical order (BFS)."""
     levels = _level_keys(selection)
     if not levels:
         return
     if max_depth is not None:
         levels = levels[:max_depth]
 
-    # BFS over selection hierarchy
-    parent_map = {None: selection.get(levels[0], [])}
-    queue: List[Tuple[str, dict, str | None, int | None]] = []
-
-    # seed with top level
+    queue: List[Tuple[str, dict, str | None, Any | None]] = []
     for c in selection.get(levels[0], []):
         queue.append((levels[0], c, None, None))
 
@@ -119,7 +107,6 @@ def _iter_selection(selection: dict, max_depth: int | None = None) -> Iterable[T
         lv, cdict, plv, pcid = queue[i]
         i += 1
         yield lv, cdict, plv, pcid
-        # enqueue children if there's a deeper level
         lv_idx = levels.index(lv)
         if lv_idx + 1 < len(levels):
             child_lv = levels[lv_idx + 1]
@@ -127,35 +114,54 @@ def _iter_selection(selection: dict, max_depth: int | None = None) -> Iterable[T
                 queue.append((child_lv, ch, lv, cdict.get("cid")))
 
 
-# ---------------------- size & z lookups ----------------------
+# --------------------- sizes & z lookups ---------------------
 
-def _sizes_per_level(H: "pd.DataFrame") -> Dict[str, Dict[int, int]]:
-    sizes: Dict[str, Dict[int, int]] = {}
+def _sizes_per_level(H: "pd.DataFrame") -> Dict[str, Dict[Any, int]]:
+    sizes: Dict[str, Dict[Any, int]] = {}
     if H is None or pd is None:
         return sizes
-    for col in [c for c in H.columns if c.lower().startswith("level_")]:
+    cols = [c for c in H.columns if str(c).lower().startswith("level_")]
+    for col in cols:
         lv = f"L{str(col).split('_')[1]}" if '_' in str(col) else str(col)
         try:
-            gp = (H[[col]].dropna().astype({col: int}).value_counts().reset_index(name='n'))
-            sizes[lv] = {int(r[col]): int(r['n']) for _, r in gp.iterrows()}
+            vc = H[col].dropna().astype(object).value_counts()
         except Exception:
-            # robust fallback
-            vc = H[col].dropna().astype(int).value_counts()
-            sizes[lv] = {int(k): int(v) for k, v in vc.items()}
+            vc = H[col].dropna().value_counts()
+        sizes[lv] = {k: int(v) for k, v in vc.items()}
     return sizes
 
-
-def _z_for(z_by_level: dict | None, lv: str, cid: int) -> float:
+def _z_for(z_by_level: dict | None, lv: str, cid: Any) -> float:
     if not z_by_level:
         return 0.0
     d = z_by_level.get(lv) or {}
     try:
-        return float(d.get(int(cid), 0.0))
+        return float(d.get(cid, d.get(int(cid), 0.0)))
     except Exception:
-        return 0.0
+        return float(d.get(cid, 0.0))
 
 
-# --------------------------- main ---------------------------
+# --------------------- safe set_options ---------------------
+
+def _safe_set_options(net: Network, opts: dict, debug_path: str | None = None) -> None:
+    """Serialize dict to JSON and call set_options. If anything fails, fallback to a minimal valid config."""
+    try:
+        net.set_options(json.dumps(opts))
+    except Exception as e:
+        if debug_path:
+            try:
+                with open(debug_path, "w", encoding="utf-8") as f:
+                    json.dump(opts, f, indent=2)
+            except Exception:
+                pass
+        fallback = {
+            "layout": {"hierarchical": {"enabled": True, "direction": "UD"}},
+            "physics": {"enabled": False},
+            "interaction": {"hover": True, "tooltipDelay": 120},
+        }
+        net.set_options(json.dumps(fallback))
+
+
+# --------------------------- main API ---------------------------
 
 def build_org_html(
     selection: dict,
@@ -163,57 +169,56 @@ def build_org_html(
     H: "pd.DataFrame",
     persons: "pd.DataFrame | None" = None,
     out_html: str = "organigram_interaktiv.html",
-    max_depth: int = 3,
+    max_depth: int = 5,
     z_by_level: dict | None = None,
     topics_by_level: dict | None = None,
     physics: bool = False,
-    label_template: str = "{level}:{cid} • {leader} • n={n} • z={z:.1f} • {topics}",
-    label_size: int = 18,
+    label_template: str = "{level}:{cid} • n={n} • {topics}",
+    label_size: int = 16,
     extra_edges: list | None = None,
     E: "pd.DataFrame | None" = None,
-    pie_in_tooltip: bool = False,
+    pie_in_tooltip: bool = True,
+    debug: bool = True,
 ) -> str:
     """Render an interactive org chart HTML with optional topic overlays and per-cluster topic summaries.
-
-    Returns the absolute path of the written HTML file.
+    Returns absolute path to the written HTML file.
     """
-    # Build a pyvis network with hierarchical layout
     net = Network(height="900px", width="100%", directed=True, notebook=False)
-    net.barnes_hut()  # decent defaults; we'll disable physics per edge later
+    net.barnes_hut()  # sensible defaults
 
-    # Global options for a tidy hierarchical layout
-    import json
-
-opts = {
-  "layout": {
-    "hierarchical": {
-      "enabled": True,
-      "direction": "UD",
-      "sortMethod": "hubsize",
-      "nodeSpacing": 180,
-      "levelSeparation": 220,
+    # always feed valid JSON
+    opts = {
+        "layout": {
+            "hierarchical": {
+                "enabled": True,
+                "direction": "UD",
+                "sortMethod": "hubsize",
+                "nodeSpacing": 180,
+                "levelSeparation": 220
+            }
+        },
+        "physics": {"enabled": bool(physics)},
+        "interaction": {"hover": True, "tooltipDelay": 120}
     }
-  },
-  "physics": { "enabled": bool(physics) },
-  "interaction": { "hover": True, "tooltipDelay": 120 }
-}
+    _safe_set_options(net, opts, "vis_options_debug.json" if debug else None)
 
-net.set_options(json.dumps(opts))
-
-    # Pre-compute sizes per level
     sizes = _sizes_per_level(H)
 
-    # Index leaders for quick lookup
-    def leader_name(lv: str, cid: int) -> str:
+    def leader_name(lv: str, cid: Any) -> str:
         if not leaders:
             return "–"
-        key_variants = [
-            (lv, int(cid)),
-            (lv.lower(), int(cid)),
-            (lv.upper(), int(cid)),
-            (int(lv.replace('L','')) if str(lv).upper().startswith('L') and str(lv)[1:].isdigit() else lv, int(cid)),
+        variants = [
+            (lv, cid),
+            (lv.lower(), cid),
+            (lv.upper(), cid),
         ]
-        for k in key_variants:
+        try:
+            variants += [
+                (int(lv.replace("L","")), int(cid))  # (2, 143)
+            ]
+        except Exception:
+            pass
+        for k in variants:
             v = leaders.get(k)
             if isinstance(v, dict) and v.get("leader"):
                 return str(v.get("leader"))
@@ -221,7 +226,7 @@ net.set_options(json.dumps(opts))
                 return v
         return "–"
 
-    # Add a root node to hang L1 clusters from (if not explicitly present)
+    # Root
     ROOT_ID = "EXEC"
     net.add_node(
         ROOT_ID,
@@ -231,43 +236,39 @@ net.set_options(json.dumps(opts))
         color={"background": "#111827", "border": "#111827"},
         level=0,
     )
+    existing_ids = {ROOT_ID}
 
-    # Track existing node ids for overlay validation
-    existing_ids = set([ROOT_ID])
-
-    # Build hierarchy nodes & edges
-    # We expect selection as nested clusters across L1..Lk
+    # Nodes & tree edges
+    n_nodes = 0
+    n_tree_edges = 0
     for lv, cdict, plv, pcid in _iter_selection(selection, max_depth=max_depth):
-        cid = int(cdict.get("cid"))
+        if cdict is None:
+            continue
+        cid = cdict.get("cid")
         keep = cdict.get("keep", True)
         if not keep:
             continue
         node_id = f"{lv}:{cid}"
-        n = sizes.get(lv, {}).get(cid, 0)
-        z = _z_for(z_by_level, lv, cid)
-        topics_list = None
-        if topics_by_level and (lv in topics_by_level):
-            topics_list = topics_by_level.get(lv, {}).get(cid)
-        topics_inline = _topics_inline_summary(topics_list, k=3)
+        n_val = sizes.get(lv, {}).get(cid, 0)
+        z_val = _z_for(z_by_level, lv, cid)
+        t_list = topics_by_level.get(lv, {}).get(cid) if topics_by_level else None
+        topics_inline = _topics_inline_summary(t_list, k=3)
         lead_nm = leader_name(lv, cid)
 
         # label
         try:
-            label = label_template.format(
-                level=lv, cid=cid, leader=lead_nm or "–",
-                n=n, z=z, deg_in=0, deg_global=0, topics=topics_inline
-            )
+            label = label_template.format(level=lv, cid=cid, n=n_val, z=z_val, topics=topics_inline)
         except Exception:
-            label = f"{lv}:{cid} • {lead_nm or '–'} • n={n} • z={z:.1f}"
+            label = f"{lv}:{cid} • n={n_val} • {topics_inline}"
 
         # tooltip
-        tip = f"<b>{_esc(lv)}:{cid}</b><br/>Leader: {_esc(lead_nm)}<br/>n: {n}<br/>z: {z:.2f}"
-        if topics_list:
-            s = float(sum(max(0.0, float(w)) for _, w in topics_list)) or 1.0
-            top5 = sorted(topics_list, key=lambda t: t[1], reverse=True)[:5]
+        tip = f"<b>{_esc(lv)}:{_esc(cid)}</b><br/>Leader: {_esc(lead_nm)}<br/>n: {n_val}<br/>z: {z_val:.2f}"
+        if t_list:
+            s = float(sum(max(0.0, float(w)) for _, w in t_list)) or 1.0
+            top5 = sorted(t_list, key=lambda t: float(t[1]), reverse=True)[:5]
             tip += "<br/>Topics: " + ", ".join(f"{_esc(l)} ({int(100*float(w)/s+0.5)}%)" for l, w in top5)
             if pie_in_tooltip:
-                img64 = _pie_png_base64(topics_list)
+                img64 = _pie_png_base64(t_list)
                 if img64:
                     tip += f'<br/><img src="data:image/png;base64,{img64}" width="120" height="120" />'
 
@@ -281,19 +282,24 @@ net.set_options(json.dumps(opts))
             level=int(str(lv).lower().replace('l','')) if str(lv).lower().startswith('l') and str(lv)[1:].isdigit() else None,
         )
         existing_ids.add(node_id)
+        n_nodes += 1
 
-        # hierarchical edge from parent
+        # parent edge
         if pcid is None:
             net.add_edge(ROOT_ID, node_id, physics=False)
+            n_tree_edges += 1
         else:
-            parent_id = f"{plv}:{int(pcid)}"
+            parent_id = f"{plv}:{pcid}"
             if parent_id in existing_ids:
                 net.add_edge(parent_id, node_id, physics=False)
+                n_tree_edges += 1
             else:
-                # parent node not created (filtered out) => hang from root
+                # If parent not kept, hang from root to keep hierarchy layout stable
                 net.add_edge(ROOT_ID, node_id, physics=False)
+                n_tree_edges += 1
 
-    # Overlay topic flow edges (do not affect layout)
+    # Topic overlay edges
+    n_topic_edges = 0
     if extra_edges:
         for e in extra_edges:
             lv = e.get("level")
@@ -301,29 +307,35 @@ net.set_options(json.dumps(opts))
             dst_cid = e.get("dst")
             if lv is None or src_cid is None or dst_cid is None:
                 continue
-            src = f"{lv}:{int(src_cid)}"
-            dst = f"{lv}:{int(dst_cid)}"
-            if src not in existing_ids or dst not in existing_ids or src == dst:
+            src = f"{lv}:{src_cid}"
+            dst = f"{lv}:{dst_cid}"
+            if src == dst:
                 continue
-            kwargs = {}
+            if (src not in existing_ids) or (dst not in existing_ids):
+                # overlay nur zwischen existierenden Knoten
+                continue
+            kwargs = {"physics": False}
+            # width/color/label etc.
             if "width" in e:
                 try:
                     kwargs["width"] = float(e["width"])
                 except Exception:
                     pass
             if "color" in e:
-                kwargs["color"] = str(e["color"])  # hex or color name
+                kwargs["color"] = str(e["color"])
             if e.get("dashes", False):
                 kwargs["dashes"] = True
             if e.get("smooth", True):
                 kwargs["smooth"] = True
             if "label" in e:
-                kwargs["label"] = str(e["label"])  # e.g., topic name or weight
+                kwargs["label"] = str(e["label"])
             if "arrows" in e:
-                kwargs["arrows"] = e["arrows"]  # e.g., 'to'
-            kwargs["physics"] = False  # never influence layout
+                kwargs["arrows"] = e["arrows"]
             net.add_edge(src, dst, **kwargs)
+            n_topic_edges += 1
 
-    # Write HTML
+    if debug:
+        print(f"[orgchart] nodes={n_nodes}  tree_edges={n_tree_edges}  topic_edges={n_topic_edges}")
+
     net.write_html(out_html)
     return out_html
