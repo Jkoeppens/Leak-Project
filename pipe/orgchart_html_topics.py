@@ -183,18 +183,18 @@ def build_org_html(
 
     # Global options for a tidy hierarchical layout
     net.set_options("""
-    const options = {
-      layout: {
-        hierarchical: {
-          enabled: true,
-          direction: 'UD',
-          sortMethod: 'hubsize',
-          nodeSpacing: 180,
-          levelSeparation: 220,
+    {
+      "layout": {
+        "hierarchical": {
+          "enabled": true,
+          "direction": "UD",
+          "sortMethod": "hubsize",
+          "nodeSpacing": 180,
+          "levelSeparation": 220
         }
       },
-      physics: { enabled: %s },
-      interaction: { hover: true, tooltipDelay: 120 }
+      "physics": { "enabled": %s },
+      "interaction": { "hover": true, "tooltipDelay": 120 }
     }
     """ % ("true" if physics else "false"))
 
