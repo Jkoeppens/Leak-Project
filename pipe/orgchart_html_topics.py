@@ -182,21 +182,23 @@ def build_org_html(
     net.barnes_hut()  # decent defaults; we'll disable physics per edge later
 
     # Global options for a tidy hierarchical layout
-    net.set_options("""
-    {
-      "layout": {
-        "hierarchical": {
-          "enabled": true,
-          "direction": "UD",
-          "sortMethod": "hubsize",
-          "nodeSpacing": 180,
-          "levelSeparation": 220
-        }
-      },
-      "physics": { "enabled": %s },
-      "interaction": { "hover": true, "tooltipDelay": 120 }
+    import json
+
+opts = {
+  "layout": {
+    "hierarchical": {
+      "enabled": True,
+      "direction": "UD",
+      "sortMethod": "hubsize",
+      "nodeSpacing": 180,
+      "levelSeparation": 220,
     }
-    """ % ("true" if physics else "false"))
+  },
+  "physics": { "enabled": bool(physics) },
+  "interaction": { "hover": True, "tooltipDelay": 120 }
+}
+
+net.set_options(json.dumps(opts))
 
     # Pre-compute sizes per level
     sizes = _sizes_per_level(H)
