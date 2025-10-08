@@ -14,7 +14,10 @@ def attach_topics_to_hierarchy(env: dict):
     org_dir = Path(env["outputs"]["org_dir"])
     pies_summary = pd.read_csv(org_dir / "cluster_topic_pies_summary.csv")
 
-    levels_csv = Path(env.get("inputs", {}).get("levels_csv") or env["paths"]["levels_csv"])
+    levels_csv = Path(
+        env.get("inputs", {}).get("levels_csv") or env["paths"]["levels_csv"]
+)
+
     H = pd.read_csv(levels_csv)
 
     # --- Helper ---
