@@ -121,7 +121,10 @@ def setup_environment(
 
     outputs_cfg = cfg.get("outputs", {})
     topics_dir = resolve_path(outputs_cfg.get("topics_dir", "reports/topics"), root)
-    org_dir = resolve_path(outputs_cfg.get("org_dir", "reports/org"), root)
+    org_dir = resolve_path(
+    outputs_cfg.get("org_dir") or paths_cfg.get("org_dir") or "reports/orgchart",
+    root
+)
     signif_dir = resolve_path(outputs_cfg.get("signif_dir", "reports/signif"), root)
 
     # Existenz prüfen / anlegen
