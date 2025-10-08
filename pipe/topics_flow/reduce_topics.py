@@ -136,6 +136,6 @@ def reduce_topics_to_meta(env: Dict[str, Any], n_meta: int = 10) -> None:
 
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-    from pipe.setup_env import setup_environment
+    from pipe.topics_flow.setup_env import setup_environment
     env = setup_environment()
     reduce_topics_to_meta(env, n_meta=10)

@@ -177,6 +177,6 @@ def label_metatopics(env: dict, top_k: int = 8, top_show: int = 3) -> None:
 
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-    from pipe.setup_env import setup_environment
+    from pipe.topics_flow.setup_env import setup_environment
     env = setup_environment()
     label_metatopics(env)

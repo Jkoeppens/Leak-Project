@@ -136,6 +136,6 @@ def topic_flows_between_clusters(env: dict) -> None:
 
 
 if __name__ == "__main__":
-    from pipe.setup_env import setup_environment
+    from pipe.topics_flow.setup_env import setup_environment
     env = setup_environment()
     topic_flows_between_clusters(env)

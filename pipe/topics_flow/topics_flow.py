@@ -191,6 +191,6 @@ def run_topic_model(
 
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-    from pipe.setup_env import setup_environment
+    from pipe.topics_flow.setup_env import setup_environment
     env = setup_environment()
     run_topic_model(env, use_subset=False)
