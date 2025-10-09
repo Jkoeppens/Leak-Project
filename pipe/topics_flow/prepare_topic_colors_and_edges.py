@@ -6,7 +6,7 @@ Automatische Schema-Erkennung für topic_flows (alt/neu).
 
 import pandas as pd
 from pathlib import Path
-from matplotlib import cm, colormaps
+from matplotlib import colormaps
 import numpy as np
 import time
 
@@ -28,7 +28,7 @@ def prepare_topic_colors_and_edges(env: dict, period: str | None = None):
     pies = pd.read_csv(pies_file)
     print(f"[ok] Eingabedateien gefunden. flows={len(flows):,}  pies={len(pies):,}")
 
-    # === 🔧 SCHEMA-HARMONISIERUNG ===
+    # === 🔧 SCHEMA-HARMONISIERUNG: FLOWS ===
     cols = set(flows.columns)
 
     if {"sender_cluster", "recipient_cluster", "topic_active"}.issubset(cols):
@@ -47,18 +47,22 @@ def prepare_topic_colors_and_edges(env: dict, period: str | None = None):
         })
         print("[ok] Altes Schema erkannt (src / dst / thread_topic_id)")
 
-    else:
-        print(f"⚠️ Unbekanntes Schema erkannt: {list(flows.columns)}")
-
     required = {"source", "target", "topic_id", "weight"}
     missing = [c for c in required if c not in flows.columns]
     if missing:
         raise ValueError(f"❌ Fehlende Spalten in flows: {missing}")
 
-    # === 🎨 Farben vorbereiten ===
-    topic_ids = sorted(pies["thread_topic_id"].dropna().unique()) \
-        if "thread_topic_id" in pies.columns else sorted(pies["topic_id"].dropna().unique())
+    # === 🔧 SCHEMA-HARMONISIERUNG: PIES ===
+    if "thread_topic_id" in pies.columns:
+        pies = pies.rename(columns={"thread_topic_id": "topic_id"})
+        print("[ok] Pies: Spalte 'thread_topic_id' → 'topic_id' umbenannt")
 
+    elif "topic_active" in pies.columns:
+        pies = pies.rename(columns={"topic_active": "topic_id"})
+        print("[ok] Pies: Spalte 'topic_active' → 'topic_id' umbenannt")
+
+    # === 🎨 Farben vorbereiten ===
+    topic_ids = sorted(pies["topic_id"].dropna().unique())
     cmap = colormaps.get_cmap("tab20")
     color_map = {tid: cmap(i % 20) for i, tid in enumerate(topic_ids)}
 
