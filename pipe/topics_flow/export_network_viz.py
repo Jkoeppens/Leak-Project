@@ -4,6 +4,15 @@ from pathlib import Path
 from pyvis.network import Network
 import time
 
+print("\n=== [DEBUG edges] ===")
+    print("Columns:", list(edges.columns))
+    print("Beispiel (erste 3 Zeilen):")
+    print(edges.head(3).to_string(index=False))
+
+    edges[src_col] = edges[src_col].astype(str)
+    edges[dst_col] = edges[dst_col].astype(str)
+    print(f"[info] src_col={src_col} | dst_col={dst_col} | topic_col={topic_col}")
+    print(f"[info] edges rows={len(edges)}")
 
 def export_network_viz(env: dict, period: str | None = None) -> None:
     """
