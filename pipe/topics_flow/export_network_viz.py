@@ -15,18 +15,23 @@ def export_network_viz(
     max_width=8.0,
     width_quantile=0.9,
     height_px=900,
-    hierarchical_direction="UD"
+    hierarchical_direction="UD",
+    debug=False
 ):
     """
     Exportiert ein interaktives vis-network (pyvis) HTML.
-    - erkennt automatisch Spaltennamen in nodes_topics.csv / edges_topics.csv
-    - nutzt hierarchische Struktur (":"-getrennte IDs)
-    - ignoriert ungültige Edges oder fehlende Nodes
-    - unterstützt Perioden-Suffixe (z. B. topic_flows_filtered_2001Q1.csv)
+
+    Features:
+      - erkennt automatisch Spaltennamen in nodes_topics.csv / edges_topics.csv
+      - nutzt hierarchische Struktur (":"-getrennte IDs)
+      - ignoriert ungültige Edges oder fehlende Nodes
+      - unterstützt Perioden-Suffixe (z. B. topic_flows_filtered_2001Q1.csv)
+      - Debug-Modus mit formatierten Beispielen und Edge-Statistik
     """
 
     print("\n=== [export_network_viz] Start ===")
 
+    # === Pfade ===
     org_dir = Path(env["outputs"]["org_dir"])
     viz_dir = org_dir / "viz"
     viz_dir.mkdir(parents=True, exist_ok=True)
@@ -57,6 +62,15 @@ def export_network_viz(
     weight_col = "weight" if "weight" in edges.columns else None
     print(f"[info] node_id_col={node_id_col} | src_col={src_col} | dst_col={dst_col} | weight_col={weight_col}")
 
+    # === Debug-Ausgabe ===
+    if debug:
+        print("\n=== [DEBUG edges] ===")
+        print("Spalten:", list(edges.columns))
+        print(edges.head(5).to_string(index=False))
+        print("\n=== [DEBUG nodes] ===")
+        print("Spalten:", list(nodes.columns))
+        print(nodes.head(5).to_string(index=False))
+
     # === Netzwerk aufbauen ===
     net = Network(
         height=f"{height_px}px",
@@ -66,7 +80,7 @@ def export_network_viz(
         notebook=False
     )
 
-    # Hierarchisches Layout aktivieren (aktuelle pyvis-Version)
+    # Hierarchisches Layout aktivieren
     net.set_options(f"""
     var options = {{
       layout: {{
@@ -82,13 +96,13 @@ def export_network_viz(
     """)
 
     # === Knoten hinzufügen ===
+    valid_nodes = set(nodes[node_id_col].astype(str))
     for _, row in nodes.iterrows():
         node_id = str(row[node_id_col]).strip()
         group = row.get("group", "org_cluster")
         net.add_node(node_id, label=node_id, group=group)
 
-    # === Kanten hinzufügen (mit Debug) ===
-    valid_nodes = set(nodes[node_id_col].astype(str))
+    # === Kanten hinzufügen ===
     added_edges = 0
     skipped_edges = []
     for _, e in edges.iterrows():
@@ -106,12 +120,13 @@ def export_network_viz(
         net.add_edge(src, dst, value=float(w), color=color)
         added_edges += 1
 
-    print(f"[done] Added {added_edges}/{len(edges)} edges")
-    if skipped_edges:
-        print(f"[debug] Skipped edges: {len(skipped_edges)}")
-        print("Beispiele:")
-        for s in skipped_edges[:10]:
-            print("  ", s)
+    # === Debug-Statistik ===
+    if debug:
+        print(f"\n[DEBUG] Added {added_edges}/{len(edges)} edges")
+        if skipped_edges:
+            print(f"[DEBUG] Skipped edges ({len(skipped_edges)}):")
+            for s in skipped_edges[:10]:
+                print("  ", s)
 
     # === Export ===
     out_html = viz_dir / f"org_topics_hier.html"
@@ -124,4 +139,4 @@ def export_network_viz(
 if __name__ == "__main__":
     from pipe.topics_flow.setup_env import setup_environment
     env = setup_environment()
-    export_network_viz(env)
+    export_network_viz(env, debug=True)
