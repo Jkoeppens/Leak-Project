@@ -104,26 +104,51 @@ def export_network_viz(
     net.set_options(json.dumps(options))
 
     # === Knoten hinzufügen ===
-    valid_nodes = set(nodes[node_id_col].astype(str))
-    exact_match, hierarchical_match = 0, 0
+    # === Knoten hinzufügen ===
+pie_dir = viz_dir / "pies"
+pie_index_path = pie_dir / "cluster_pies_index.csv"
+pie_map = {}
 
-    for _, row in nodes.iterrows():
-        node_id = str(row[node_id_col]).strip()
-        group = row.get("group", "org_cluster")
+if pie_index_path.exists():
+    pie_index = pd.read_csv(pie_index_path)
+    pie_map = dict(zip(pie_index["cluster_id"].astype(str), pie_index["pie_path"]))
+    print(f"[viz] {len(pie_map)} Pie-Images geladen aus {pie_index_path.name}")
+else:
+    print("[viz] Keine Pie-Images gefunden (pies/cluster_pies_index.csv fehlt)")
 
-        label = None
-        if node_id in label_map:
-            label = label_map[node_id]
-            exact_match += 1
-        else:
-            label = find_hierarchical_label(node_id)
-            if label:
-                hierarchical_match += 1
+valid_nodes = set(nodes[node_id_col].astype(str))
+exact_match, hierarchical_match, with_image = 0, 0, 0
 
-        label = label or node_id  # Fallback
-        net.add_node(node_id, label=label, group=group)
+for _, row in nodes.iterrows():
+    node_id = str(row[node_id_col]).strip()
+    group = row.get("group", "org_cluster")
 
-    print(f"[label-stats] exact={exact_match} | hierarchical={hierarchical_match} | total={len(nodes)}")
+    label = None
+    if node_id in label_map:
+        label = label_map[node_id]
+        exact_match += 1
+    else:
+        label = find_hierarchical_label(node_id)
+        if label:
+            hierarchical_match += 1
+
+    label = label or node_id
+    short_label = label[:80] + "…" if len(label) > 80 else label
+    img_path = pie_map.get(node_id)
+
+    if img_path:
+        net.add_node(
+            node_id,
+            label=short_label,
+            title=label,
+            shape="image",
+            image=str(pie_dir / img_path)
+        )
+        with_image += 1
+    else:
+        net.add_node(node_id, label=short_label, title=label, group=group)
+
+print(f"[label-stats] exact={exact_match} | hierarchical={hierarchical_match} | with_image={with_image} | total={len(nodes)}")
 
     # === Kanten hinzufügen ===
     added_edges = 0
