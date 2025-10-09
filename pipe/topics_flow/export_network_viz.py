@@ -4,6 +4,7 @@ import numpy as np
 from pathlib import Path
 from pyvis.network import Network
 import datetime as dt
+import json
 
 
 def export_network_viz(
@@ -23,10 +24,10 @@ def export_network_viz(
 
     Features:
       - erkennt automatisch Spaltennamen in nodes_topics.csv / edges_topics.csv
-      - nutzt hierarchische Struktur (":"-getrennte IDs)
+      - liest cluster_labels.csv (id,label) zur Beschriftung
+      - nutzt hierarchische Label-Suche (Präfix-Matching bei ":"-IDs)
       - ignoriert ungültige Edges oder fehlende Nodes
-      - unterstützt Perioden-Suffixe (z. B. topic_flows_filtered_2001Q1.csv)
-      - Debug-Modus mit formatierten Beispielen und Edge-Statistik
+      - Debug-Modus mit Statistik zu Label-Matches
     """
 
     print("\n=== [export_network_viz] Start ===")
@@ -38,6 +39,8 @@ def export_network_viz(
 
     nodes_path = viz_dir / "nodes_topics.csv"
     edges_path = viz_dir / "edges_topics.csv"
+    labels_path = viz_dir / "cluster_labels.csv"
+
     assert nodes_path.exists(), f"❌ Datei fehlt: {nodes_path}"
     assert edges_path.exists(), f"❌ Datei fehlt: {edges_path}"
 
@@ -45,8 +48,31 @@ def export_network_viz(
 
     nodes = pd.read_csv(nodes_path)
     edges = pd.read_csv(edges_path)
-
     print(f"[load] nodes={len(nodes)} | edges={len(edges)}")
+
+    # === Labels laden (optional)
+    label_map = {}
+    if labels_path.exists():
+        labels_df = pd.read_csv(labels_path)
+        id_col = next((c for c in ["id", "cluster_id", "node_id"] if c in labels_df.columns), None)
+        label_col = next((c for c in ["label", "topic_label"] if c in labels_df.columns), None)
+        if id_col and label_col:
+            label_map = dict(zip(labels_df[id_col].astype(str), labels_df[label_col]))
+            print(f"[labels] Loaded {len(label_map)} labels from {labels_path.name} (columns: {id_col}, {label_col})")
+        else:
+            print(f"[warn] Keine passenden Spalten in cluster_labels.csv: {labels_df.columns.tolist()}")
+    else:
+        print(f"[warn] cluster_labels.csv nicht gefunden unter {labels_path}")
+
+    # === Hilfsfunktion: hierarchische Labelsuche ===
+    def find_hierarchical_label(node_id: str):
+        """Suche längsten Präfix in label_map, getrennt durch ':'"""
+        parts = node_id.split(":")
+        for i in range(len(parts), 0, -1):
+            prefix = ":".join(parts[:i])
+            if prefix in label_map:
+                return label_map[prefix]
+        return None
 
     # === Automatische Spaltenerkennung ===
     possible_node_cols = ["node_id", "id", "cluster_id"]
@@ -62,15 +88,6 @@ def export_network_viz(
     weight_col = "weight" if "weight" in edges.columns else None
     print(f"[info] node_id_col={node_id_col} | src_col={src_col} | dst_col={dst_col} | weight_col={weight_col}")
 
-    # === Debug-Ausgabe ===
-    if debug:
-        print("\n=== [DEBUG edges] ===")
-        print("Spalten:", list(edges.columns))
-        print(edges.head(5).to_string(index=False))
-        print("\n=== [DEBUG nodes] ===")
-        print("Spalten:", list(nodes.columns))
-        print(nodes.head(5).to_string(index=False))
-
     # === Netzwerk aufbauen ===
     net = Network(
         height=f"{height_px}px",
@@ -80,28 +97,33 @@ def export_network_viz(
         notebook=False
     )
 
-    import json
-
-    # Hierarchisches Layout aktivieren
     options = {
-      "layout": {
-        "hierarchical": {
-          "direction": hierarchical_direction,
-          "sortMethod": "directed"
-        }
-      },
-      "physics": {
-        "enabled": False
-      }
+        "layout": {"hierarchical": {"direction": hierarchical_direction, "sortMethod": "directed"}},
+        "physics": {"enabled": False}
     }
     net.set_options(json.dumps(options))
 
     # === Knoten hinzufügen ===
     valid_nodes = set(nodes[node_id_col].astype(str))
+    exact_match, hierarchical_match = 0, 0
+
     for _, row in nodes.iterrows():
         node_id = str(row[node_id_col]).strip()
         group = row.get("group", "org_cluster")
-        net.add_node(node_id, label=node_id, group=group)
+
+        label = None
+        if node_id in label_map:
+            label = label_map[node_id]
+            exact_match += 1
+        else:
+            label = find_hierarchical_label(node_id)
+            if label:
+                hierarchical_match += 1
+
+        label = label or node_id  # Fallback
+        net.add_node(node_id, label=label, group=group)
+
+    print(f"[label-stats] exact={exact_match} | hierarchical={hierarchical_match} | total={len(nodes)}")
 
     # === Kanten hinzufügen ===
     added_edges = 0
@@ -121,18 +143,16 @@ def export_network_viz(
         net.add_edge(src, dst, value=float(w), color=color)
         added_edges += 1
 
-    # === Debug-Statistik ===
     if debug:
-        print(f"\n[DEBUG] Added {added_edges}/{len(edges)} edges")
+        print(f"[debug] Added {added_edges}/{len(edges)} edges")
         if skipped_edges:
-            print(f"[DEBUG] Skipped edges ({len(skipped_edges)}):")
+            print(f"[debug] Skipped {len(skipped_edges)} edges (showing first 10):")
             for s in skipped_edges[:10]:
                 print("  ", s)
 
     # === Export ===
-    out_html = viz_dir / f"org_topics_hier.html"
+    out_html = viz_dir / "org_topics_hier.html"
     net.save_graph(str(out_html))
-
     print(f"[write] {out_html}  | nodes={len(nodes)} edges={added_edges}")
     print("✅ [export_network_viz] fertig.")
 
