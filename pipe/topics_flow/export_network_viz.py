@@ -1,10 +1,9 @@
 # === pipe/topics_flow/export_network_viz.py ===
+import os
+import json
 import pandas as pd
-import numpy as np
 from pathlib import Path
 from pyvis.network import Network
-import datetime as dt
-import json
 
 
 def export_network_viz(
@@ -26,47 +25,45 @@ def export_network_viz(
       - erkennt automatisch Spaltennamen in nodes_topics.csv / edges_topics.csv
       - liest cluster_labels.csv (id,label) zur Beschriftung
       - nutzt hierarchische Label-Suche (Präfix-Matching bei ":"-IDs)
-      - ignoriert ungültige Edges oder fehlende Nodes
+      - bindet Mini-Pies aus viz/pies/ als Node-Icons ein (falls vorhanden)
       - Debug-Modus mit Statistik zu Label-Matches
     """
 
     print("\n=== [export_network_viz] Start ===")
 
-    # === Pfade ===
+    # --- Pfade ---
     org_dir = Path(env["outputs"]["org_dir"])
     viz_dir = org_dir / "viz"
     viz_dir.mkdir(parents=True, exist_ok=True)
 
-    nodes_path = viz_dir / "nodes_topics.csv"
-    edges_path = viz_dir / "edges_topics.csv"
+    nodes_path  = viz_dir / "nodes_topics.csv"
+    edges_path  = viz_dir / "edges_topics.csv"
     labels_path = viz_dir / "cluster_labels.csv"
 
     assert nodes_path.exists(), f"❌ Datei fehlt: {nodes_path}"
     assert edges_path.exists(), f"❌ Datei fehlt: {edges_path}"
-
     print(f"[ok] Eingabedateien: {nodes_path.name}, {edges_path.name}")
 
     nodes = pd.read_csv(nodes_path)
     edges = pd.read_csv(edges_path)
     print(f"[load] nodes={len(nodes)} | edges={len(edges)}")
 
-    # === Labels laden (optional)
+    # --- Labels laden (optional) ---
     label_map = {}
     if labels_path.exists():
-        labels_df = pd.read_csv(labels_path)
-        id_col = next((c for c in ["id", "cluster_id", "node_id"] if c in labels_df.columns), None)
-        label_col = next((c for c in ["label", "topic_label"] if c in labels_df.columns), None)
-        if id_col and label_col:
-            label_map = dict(zip(labels_df[id_col].astype(str), labels_df[label_col]))
-            print(f"[labels] Loaded {len(label_map)} labels from {labels_path.name} (columns: {id_col}, {label_col})")
-        else:
-            print(f"[warn] Keine passenden Spalten in cluster_labels.csv: {labels_df.columns.tolist()}")
+      labels_df = pd.read_csv(labels_path)
+      id_col    = next((c for c in ["id", "cluster_id", "node_id"] if c in labels_df.columns), None)
+      label_col = next((c for c in ["label", "topic_label"]              if c in labels_df.columns), None)
+      if id_col and label_col:
+          label_map = dict(zip(labels_df[id_col].astype(str), labels_df[label_col]))
+          print(f"[labels] Loaded {len(label_map)} labels from {labels_path.name} (columns: {id_col}, {label_col})")
+      else:
+          print(f"[warn] Keine passenden Spalten in cluster_labels.csv: {labels_df.columns.tolist()}")
     else:
-        print(f"[warn] cluster_labels.csv nicht gefunden unter {labels_path}")
+      print(f"[warn] cluster_labels.csv nicht gefunden unter {labels_path}")
 
-    # === Hilfsfunktion: hierarchische Labelsuche ===
+    # --- Hilfsfunktion: hierarchische Labelsuche ---
     def find_hierarchical_label(node_id: str):
-        """Suche längsten Präfix in label_map, getrennt durch ':'"""
         parts = node_id.split(":")
         for i in range(len(parts), 0, -1):
             prefix = ":".join(parts[:i])
@@ -74,7 +71,7 @@ def export_network_viz(
                 return label_map[prefix]
         return None
 
-    # === Automatische Spaltenerkennung ===
+    # --- Automatische Spaltenerkennung ---
     possible_node_cols = ["node_id", "id", "cluster_id"]
     node_id_col = next((c for c in possible_node_cols if c in nodes.columns), None)
     assert node_id_col, f"❌ Keine gültige ID-Spalte in nodes_topics.csv gefunden: {nodes.columns}"
@@ -88,7 +85,7 @@ def export_network_viz(
     weight_col = "weight" if "weight" in edges.columns else None
     print(f"[info] node_id_col={node_id_col} | src_col={src_col} | dst_col={dst_col} | weight_col={weight_col}")
 
-    # === Netzwerk aufbauen ===
+    # --- Netzwerk aufbauen ---
     net = Network(
         height=f"{height_px}px",
         width="100%",
@@ -96,61 +93,63 @@ def export_network_viz(
         directed=True,
         notebook=False
     )
-
     options = {
         "layout": {"hierarchical": {"direction": hierarchical_direction, "sortMethod": "directed"}},
         "physics": {"enabled": False}
     }
     net.set_options(json.dumps(options))
 
-    # === Knoten hinzufügen ===
-    # === Knoten hinzufügen ===
-pie_dir = viz_dir / "pies"
-pie_index_path = pie_dir / "cluster_pies_index.csv"
-pie_map = {}
-
-if pie_index_path.exists():
-    pie_index = pd.read_csv(pie_index_path)
-    pie_map = dict(zip(pie_index["cluster_id"].astype(str), pie_index["pie_path"]))
-    print(f"[viz] {len(pie_map)} Pie-Images geladen aus {pie_index_path.name}")
-else:
-    print("[viz] Keine Pie-Images gefunden (pies/cluster_pies_index.csv fehlt)")
-
-valid_nodes = set(nodes[node_id_col].astype(str))
-exact_match, hierarchical_match, with_image = 0, 0, 0
-
-for _, row in nodes.iterrows():
-    node_id = str(row[node_id_col]).strip()
-    group = row.get("group", "org_cluster")
-
-    label = None
-    if node_id in label_map:
-        label = label_map[node_id]
-        exact_match += 1
+    # --- Pies laden (optional) ---
+    pie_dir = viz_dir / "pies"
+    pie_index_path = pie_dir / "cluster_pies_index.csv"
+    pie_map = {}
+    if pie_index_path.exists():
+        pie_index = pd.read_csv(pie_index_path)
+        pie_map = dict(zip(pie_index["cluster_id"].astype(str), pie_index["pie_path"]))
+        print(f"[viz] {len(pie_map)} Pie-Images geladen aus {pie_index_path.name}")
     else:
-        label = find_hierarchical_label(node_id)
-        if label:
-            hierarchical_match += 1
+        print("[viz] Keine Pie-Images gefunden (pies/cluster_pies_index.csv fehlt)")
 
-    label = label or node_id
-    short_label = label[:80] + "…" if len(label) > 80 else label
-    img_path = pie_map.get(node_id)
+    # --- Knoten hinzufügen ---
+    valid_nodes = set(nodes[node_id_col].astype(str))
+    exact_match = hierarchical_match = with_image = 0
 
-    if img_path:
-        net.add_node(
-            node_id,
-            label=short_label,
-            title=label,
-            shape="image",
-            image=str(pie_dir / img_path)
-        )
-        with_image += 1
-    else:
-        net.add_node(node_id, label=short_label, title=label, group=group)
+    for _, row in nodes.iterrows():
+        node_id = str(row[node_id_col]).strip()
+        group = row.get("group", "org_cluster")
 
-print(f"[label-stats] exact={exact_match} | hierarchical={hierarchical_match} | with_image={with_image} | total={len(nodes)}")
+        # Label bestimmen
+        label = label_map.get(node_id)
+        if label is not None:
+            exact_match += 1
+        else:
+            label = find_hierarchical_label(node_id)
+            if label is not None:
+                hierarchical_match += 1
 
-    # === Kanten hinzufügen ===
+        label = label or node_id
+        short_label = (label[:80] + "…") if len(label) > 80 else label
+
+        # Bildpfad relativ zum HTML (wichtig, damit es außerhalb Colab lädt)
+        img_rel = None
+        if node_id in pie_map:
+            img_rel = os.path.relpath(pie_dir / pie_map[node_id], viz_dir)
+
+        if img_rel:
+            net.add_node(
+                node_id,
+                label=short_label,
+                title=label,
+                shape="image",
+                image=img_rel
+            )
+            with_image += 1
+        else:
+            net.add_node(node_id, label=short_label, title=label, group=group)
+
+    print(f"[label-stats] exact={exact_match} | hierarchical={hierarchical_match} | with_image={with_image} | total={len(nodes)}")
+
+    # --- Kanten hinzufügen ---
     added_edges = 0
     skipped_edges = []
     for _, e in edges.iterrows():
@@ -171,11 +170,11 @@ print(f"[label-stats] exact={exact_match} | hierarchical={hierarchical_match} | 
     if debug:
         print(f"[debug] Added {added_edges}/{len(edges)} edges")
         if skipped_edges:
-            print(f"[debug] Skipped {len(skipped_edges)} edges (showing first 10):")
+            print(f"[debug] Skipped {len(skipped_edges)} edges (first 10):")
             for s in skipped_edges[:10]:
                 print("  ", s)
 
-    # === Export ===
+    # --- Export ---
     out_html = viz_dir / "org_topics_hier.html"
     net.save_graph(str(out_html))
     print(f"[write] {out_html}  | nodes={len(nodes)} edges={added_edges}")
