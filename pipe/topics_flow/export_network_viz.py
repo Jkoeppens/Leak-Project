@@ -1,102 +1,106 @@
 # === pipe/topics_flow/export_network_viz.py ===
-"""
-Exportiert ein interaktives vis-network (pyvis) HTML:
-- erkennt automatisch Spaltennamen in nodes_topics.csv / edges_topics.csv
-- nutzt hierarchische Struktur (":"-getrennte IDs)
-- ignoriert ungültige Edges oder fehlende Nodes
-- unterstützt Perioden-Suffixe (z. B. topic_flows_filtered_2001Q1.csv)
-"""
-
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from pyvis.network import Network
 import datetime as dt
 
-def export_network_viz(env,
-                       topic_filter=None,
-                       min_edge_weight=None,
-                       hide_self_loops=True,
-                       bg_color="#ffffff",
-                       max_width=8.0,
-                       width_quantile=0.9,
-                       height_px=900,
-                       hierarchical_direction="UD"):
+
+def export_network_viz(
+    env,
+    topic_filter=None,
+    min_edge_weight=None,
+    hide_self_loops=True,
+    bg_color="#ffffff",
+    max_width=8.0,
+    width_quantile=0.9,
+    height_px=900,
+    hierarchical_direction="UD"
+):
+    """
+    Exportiert ein interaktives vis-network (pyvis) HTML.
+    - erkennt automatisch Spaltennamen in nodes_topics.csv / edges_topics.csv
+    - nutzt hierarchische Struktur (":"-getrennte IDs)
+    - ignoriert ungültige Edges oder fehlende Nodes
+    - unterstützt Perioden-Suffixe (z. B. topic_flows_filtered_2001Q1.csv)
+    """
+
     print("\n=== [export_network_viz] Start ===")
 
     org_dir = Path(env["outputs"]["org_dir"])
     viz_dir = org_dir / "viz"
-    viz_dir.mkdir(exist_ok=True, parents=True)
+    viz_dir.mkdir(parents=True, exist_ok=True)
 
     nodes_path = viz_dir / "nodes_topics.csv"
     edges_path = viz_dir / "edges_topics.csv"
-    assert nodes_path.exists() and edges_path.exists(), "Fehlende Eingabedateien"
+    assert nodes_path.exists(), f"❌ Datei fehlt: {nodes_path}"
+    assert edges_path.exists(), f"❌ Datei fehlt: {edges_path}"
+
     print(f"[ok] Eingabedateien: {nodes_path.name}, {edges_path.name}")
 
     nodes = pd.read_csv(nodes_path)
     edges = pd.read_csv(edges_path)
+
     print(f"[load] nodes={len(nodes)} | edges={len(edges)}")
 
-    # === Schema-Erkennung ===
-    node_id_col = "node_id" if "node_id" in nodes.columns else (
-        "cluster_id" if "cluster_id" in nodes.columns else nodes.columns[0]
-    )
-    src_col = "source" if "source" in edges.columns else (
-        "sender_cluster" if "sender_cluster" in edges.columns else edges.columns[0]
-    )
-    dst_col = "target" if "target" in edges.columns else (
-        "recipient_cluster" if "recipient_cluster" in edges.columns else edges.columns[1]
-    )
-    weight_col = "weight" if "weight" in edges.columns else (
-        "w" if "w" in edges.columns else None
-    )
+    # === Automatische Spaltenerkennung ===
+    possible_node_cols = ["node_id", "id", "cluster_id"]
+    node_id_col = next((c for c in possible_node_cols if c in nodes.columns), None)
+    assert node_id_col, f"❌ Keine gültige ID-Spalte in nodes_topics.csv gefunden: {nodes.columns}"
 
+    possible_src_cols = ["src", "source", "sender_cluster"]
+    possible_dst_cols = ["dst", "target", "recipient_cluster"]
+    src_col = next((c for c in possible_src_cols if c in edges.columns), None)
+    dst_col = next((c for c in possible_dst_cols if c in edges.columns), None)
+    assert src_col and dst_col, f"❌ Keine gültigen Quell-/Zielspalten in edges_topics.csv: {edges.columns}"
+
+    weight_col = "weight" if "weight" in edges.columns else None
     print(f"[info] node_id_col={node_id_col} | src_col={src_col} | dst_col={dst_col} | weight_col={weight_col}")
 
-    # === Filtern & vorbereiten ===
-    if weight_col and min_edge_weight:
-        edges = edges[edges[weight_col] >= min_edge_weight]
-        print(f"[filter] edges >= {min_edge_weight}: {len(edges)}")
+    # === Netzwerk aufbauen ===
+    net = Network(
+        height=f"{height_px}px",
+        width="100%",
+        bgcolor=bg_color,
+        directed=True,
+        notebook=False
+    )
+    net.hierarchical_layout(direction=hierarchical_direction)
 
-    if hide_self_loops:
-        edges = edges[edges[src_col] != edges[dst_col]]
+    # === Knoten hinzufügen ===
+    for _, row in nodes.iterrows():
+        node_id = str(row[node_id_col]).strip()
+        group = row.get("group", "org_cluster")
+        net.add_node(node_id, label=node_id, group=group)
 
-    edges[src_col] = edges[src_col].astype(str)
-    edges[dst_col] = edges[dst_col].astype(str)
-    nodes[node_id_col] = nodes[node_id_col].astype(str)
-
-    # === Netzwerk erstellen ===
-    net = Network(height=f"{height_px}px", width="100%", bgcolor=bg_color, directed=True)
-    net.barnes_hut(gravity=-80000, central_gravity=0.3, spring_length=120)
-
-    for _, n in nodes.iterrows():
-        nid = n[node_id_col]
-        color = n.get("color", "#999999")
-        label = str(n.get("topic_name", nid))
-        size = np.sqrt(n.get("n_events", 5)) * 3
-        net.add_node(nid, label=label, color=color, size=size)
-
-    added = 0
+    # === Kanten hinzufügen ===
+    valid_nodes = set(nodes[node_id_col].astype(str))
+    added_edges = 0
     for _, e in edges.iterrows():
-        src, dst = e[src_col], e[dst_col]
-        if src not in nodes[node_id_col].values or dst not in nodes[node_id_col].values:
+        src = str(e[src_col]).strip()
+        dst = str(e[dst_col]).strip()
+        if hide_self_loops and src == dst:
             continue
-        width = float(e.get("width", 1.0))
-        color = e.get("color", "#cccccc")
-        net.add_edge(src, dst, color=color, width=width)
-        added += 1
+        if src not in valid_nodes or dst not in valid_nodes:
+            continue
 
-    print(f"[done] Added {added}/{len(edges)} edges")
+        w = e.get(weight_col, 1.0)
+        color = e.get("color", "#999999")
+        net.add_edge(src, dst, value=float(w), color=color)
+        added_edges += 1
 
-    # === Speichern ===
-    period = None
-    for f in viz_dir.glob("edges_topics_*.csv"):
-        p = f.stem.replace("edges_topics_", "")
-        if len(p) > 0:
-            period = p
-    suffix = f"_{period}" if period else ""
-    out_html = viz_dir / f"org_topics_hier{suffix}.html"
+    print(f"[done] Added {added_edges}/{len(edges)} edges")
+
+    # === Export ===
+    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_html = viz_dir / f"org_topics_hier.html"
     net.save_graph(str(out_html))
 
-    print(f"[write] {out_html}  | nodes={len(nodes)} edges={added}")
+    print(f"[write] {out_html}  | nodes={len(nodes)} edges={added_edges}")
     print("✅ [export_network_viz] fertig.")
+
+
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    export_network_viz(env)
