@@ -1,21 +1,12 @@
 # === pipe/topics_flow/prepare_topic_colors_and_edges.py ===
 """
-Bereitet Farbcodes und Netzwerk-Edges für die Orgchart-Visualisierung vor.
-
-Input:
-  - topic_flows_filtered.csv (oder periodische Varianten)
-  - cluster_topic_pies_summary.csv
-  - topic_info_labels.csv (optional, für Farbzuordnung)
-
-Output:
-  - reports/orgchart/viz/nodes_topics.csv
-  - reports/orgchart/viz/edges_topics.csv
-  - reports/orgchart/viz/topic_colors.csv
+Bereitet farbcodierte Topics und Kanteninformationen für das Organisationsnetzwerk auf.
+Automatische Schema-Erkennung für topic_flows (alt/neu).
 """
 
 import pandas as pd
 from pathlib import Path
-from matplotlib import cm
+from matplotlib import cm, colormaps
 import numpy as np
 import time
 
@@ -27,98 +18,94 @@ def prepare_topic_colors_and_edges(env: dict, period: str | None = None):
     org_dir = Path(env["outputs"]["org_dir"])
     topics_dir = Path(env["outputs"]["topics_dir"])
 
-    # --------------------------------------------------
-    # Eingabedateien prüfen
-    # --------------------------------------------------
-    flow_file = (
-        org_dir / f"topic_flows_filtered_{period.replace('-', '').replace('_', '')}.csv"
-        if period
-        else org_dir / "topic_flows_filtered.csv"
-    )
+    flow_file = org_dir / "topic_flows_filtered.csv"
     pies_file = org_dir / "cluster_topic_pies_summary.csv"
-    labels_file = topics_dir / "topic_info_labels.csv"
 
-    for f in [flow_file, pies_file]:
-        assert f.exists(), f"❌ Datei fehlt: {f}"
-    if not labels_file.exists():
-        print(f"⚠️ Keine topic_info_labels.csv gefunden → neutrale Farben")
+    assert flow_file.exists(), f"❌ Fehlende Datei: {flow_file}"
+    assert pies_file.exists(), f"❌ Fehlende Datei: {pies_file}"
 
-    # --------------------------------------------------
-    # CSVs laden
-    # --------------------------------------------------
     flows = pd.read_csv(flow_file)
     pies = pd.read_csv(pies_file)
-    labels = pd.read_csv(labels_file) if labels_file.exists() else pd.DataFrame()
+    print(f"[ok] Eingabedateien gefunden. flows={len(flows):,}  pies={len(pies):,}")
 
-    print(f"[ok] Eingelesen: flows={len(flows):,}, pies={len(pies):,}")
+    # === 🔧 SCHEMA-HARMONISIERUNG ===
+    cols = set(flows.columns)
 
-    # --------------------------------------------------
-    # Schema validieren / anpassen
-    # --------------------------------------------------
-    if "topic_active" not in flows.columns:
-        if "thread_topic_id" in flows.columns:
-            flows = flows.rename(columns={"thread_topic_id": "topic_active"})
-        else:
-            raise ValueError("❌ Keine topic_active/thread_topic_id-Spalte in flows gefunden")
+    if {"sender_cluster", "recipient_cluster", "topic_active"}.issubset(cols):
+        flows = flows.rename(columns={
+            "sender_cluster": "source",
+            "recipient_cluster": "target",
+            "topic_active": "topic_id"
+        })
+        print("[ok] Neues Schema erkannt (sender_cluster / recipient_cluster / topic_active)")
 
-    if "topic_name_active" not in flows.columns and "topic_label" in flows.columns:
-        flows = flows.rename(columns={"topic_label": "topic_name_active"})
+    elif {"src", "dst", "thread_topic_id"}.issubset(cols):
+        flows = flows.rename(columns={
+            "src": "source",
+            "dst": "target",
+            "thread_topic_id": "topic_id"
+        })
+        print("[ok] Altes Schema erkannt (src / dst / thread_topic_id)")
 
-    if "topic_name_active" not in flows.columns:
-        flows["topic_name_active"] = "unknown"
+    else:
+        print(f"⚠️ Unbekanntes Schema erkannt: {list(flows.columns)}")
 
-    # --------------------------------------------------
-    # Topics für Farben bestimmen
-    # --------------------------------------------------
-    topic_ids = sorted(flows["topic_active"].dropna().unique().tolist())
-    cmap = cm.get_cmap("tab20", max(10, len(topic_ids)))
+    required = {"source", "target", "topic_id", "weight"}
+    missing = [c for c in required if c not in flows.columns]
+    if missing:
+        raise ValueError(f"❌ Fehlende Spalten in flows: {missing}")
 
-    colors = {
-        tid: cm.colors.to_hex(cmap(i / len(topic_ids))) for i, tid in enumerate(topic_ids)
+    # === 🎨 Farben vorbereiten ===
+    topic_ids = sorted(pies["thread_topic_id"].dropna().unique()) \
+        if "thread_topic_id" in pies.columns else sorted(pies["topic_id"].dropna().unique())
+
+    cmap = colormaps.get_cmap("tab20")
+    color_map = {tid: cmap(i % 20) for i, tid in enumerate(topic_ids)}
+
+    # Farben als Hex konvertieren
+    color_hex = {
+        tid: "#{:02x}{:02x}{:02x}".format(
+            int(255 * color_map[tid][0]),
+            int(255 * color_map[tid][1]),
+            int(255 * color_map[tid][2])
+        )
+        for tid in color_map
     }
-    flows["color"] = flows["topic_active"].map(colors)
-    flows["width"] = flows["weight"] / flows["weight"].max() * 8
 
-    # --------------------------------------------------
-    # Nodes generieren
-    # --------------------------------------------------
-    nodes_sender = flows["sender_cluster"].unique().tolist()
-    nodes_recipient = flows["recipient_cluster"].unique().tolist()
-    all_nodes = sorted(set(nodes_sender + nodes_recipient))
+    flows["color"] = flows["topic_id"].map(color_hex).fillna("#999999")
 
-    nodes_df = pd.DataFrame({"node_id": all_nodes})
-    nodes_df["n_out"] = nodes_df["node_id"].map(flows["sender_cluster"].value_counts())
-    nodes_df["n_in"] = nodes_df["node_id"].map(flows["recipient_cluster"].value_counts())
-    nodes_df = nodes_df.fillna(0)
-    nodes_df["degree"] = nodes_df["n_out"] + nodes_df["n_in"]
+    # === 📈 Linienbreite skalieren ===
+    flows["width"] = np.log1p(flows["weight"]) / np.log1p(flows["weight"]).max() * 10
 
-    # --------------------------------------------------
-    # Outputs sichern
-    # --------------------------------------------------
+    # === 🧩 Edges / Nodes speichern ===
     viz_dir = org_dir / "viz"
     viz_dir.mkdir(parents=True, exist_ok=True)
 
-    nodes_out = viz_dir / "nodes_topics.csv"
     edges_out = viz_dir / "edges_topics.csv"
-    color_out = viz_dir / "topic_colors.csv"
+    nodes_out = viz_dir / "nodes_topics.csv"
+    colors_out = viz_dir / "topic_colors.csv"
 
-    nodes_df.to_csv(nodes_out, index=False)
+    flows["edge_id"] = flows.apply(
+        lambda r: f"{r['source']}||{r['target']}||{r['topic_id']}", axis=1
+    )
     flows.to_csv(edges_out, index=False)
+    print(f"[write] {edges_out} ({len(flows):,} edges)")
 
-    pd.DataFrame(
-        [{"topic_active": k, "color": v} for k, v in colors.items()]
-    ).to_csv(color_out, index=False)
+    # === Nodes ===
+    nodes = pd.DataFrame({
+        "id": pd.unique(flows[["source", "target"]].values.ravel("K")),
+        "group": "org_cluster"
+    })
+    nodes.to_csv(nodes_out, index=False)
+    print(f"[write] {nodes_out} ({len(nodes):,} nodes)")
 
-    print(f"[write] {nodes_out.name}  ({len(nodes_df):,} nodes)")
-    print(f"[write] {edges_out.name}  ({len(flows):,} edges)")
-    print(f"[write] {color_out.name}  ({len(colors):,} topics)")
-    print(f"[done] Dauer: {time.time() - t0:.1f}s")
-    print("✅ [prepare_topic_colors_and_edges] abgeschlossen.")
+    # === Farben ===
+    pd.DataFrame(list(color_hex.items()), columns=["topic_id", "color"]).to_csv(colors_out, index=False)
+    print(f"[write] {colors_out} ({len(color_hex):,} topics)")
+
+    print(f"\n✅ [prepare_topic_colors_and_edges] abgeschlossen in {time.time()-t0:.1f}s")
 
 
-# --------------------------------------------------
-# CLI / Run Support
-# --------------------------------------------------
 if __name__ == "__main__":
     from pipe.topics_flow.setup_env import setup_environment
     env = setup_environment()
