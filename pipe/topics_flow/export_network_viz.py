@@ -65,7 +65,21 @@ def export_network_viz(
         directed=True,
         notebook=False
     )
-    net.hierarchical_layout(direction=hierarchical_direction)
+
+    # Hierarchisches Layout aktivieren (aktuelle pyvis-Version)
+    net.set_options(f"""
+    var options = {{
+      layout: {{
+        hierarchical: {{
+          direction: '{hierarchical_direction}',
+          sortMethod: 'directed'
+        }}
+      }},
+      physics: {{
+        enabled: false
+      }}
+    }}
+    """)
 
     # === Knoten hinzufügen ===
     for _, row in nodes.iterrows():
@@ -73,15 +87,18 @@ def export_network_viz(
         group = row.get("group", "org_cluster")
         net.add_node(node_id, label=node_id, group=group)
 
-    # === Kanten hinzufügen ===
+    # === Kanten hinzufügen (mit Debug) ===
     valid_nodes = set(nodes[node_id_col].astype(str))
     added_edges = 0
+    skipped_edges = []
     for _, e in edges.iterrows():
         src = str(e[src_col]).strip()
         dst = str(e[dst_col]).strip()
         if hide_self_loops and src == dst:
+            skipped_edges.append((src, dst, "self-loop"))
             continue
         if src not in valid_nodes or dst not in valid_nodes:
+            skipped_edges.append((src, dst, "missing node"))
             continue
 
         w = e.get(weight_col, 1.0)
@@ -90,9 +107,13 @@ def export_network_viz(
         added_edges += 1
 
     print(f"[done] Added {added_edges}/{len(edges)} edges")
+    if skipped_edges:
+        print(f"[debug] Skipped edges: {len(skipped_edges)}")
+        print("Beispiele:")
+        for s in skipped_edges[:10]:
+            print("  ", s)
 
     # === Export ===
-    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     out_html = viz_dir / f"org_topics_hier.html"
     net.save_graph(str(out_html))
 
