@@ -1,131 +1,102 @@
 # === pipe/topics_flow/export_network_viz.py ===
+"""
+Exportiert ein interaktives vis-network (pyvis) HTML:
+- erkennt automatisch Spaltennamen in nodes_topics.csv / edges_topics.csv
+- nutzt hierarchische Struktur (":"-getrennte IDs)
+- ignoriert ungültige Edges oder fehlende Nodes
+- unterstützt Perioden-Suffixe (z. B. topic_flows_filtered_2001Q1.csv)
+"""
+
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from pyvis.network import Network
-import time
+import datetime as dt
 
-print("\n=== [DEBUG edges] ===")
-    print("Columns:", list(edges.columns))
-    print("Beispiel (erste 3 Zeilen):")
-    print(edges.head(3).to_string(index=False))
-
-    edges[src_col] = edges[src_col].astype(str)
-    edges[dst_col] = edges[dst_col].astype(str)
-    print(f"[info] src_col={src_col} | dst_col={dst_col} | topic_col={topic_col}")
-    print(f"[info] edges rows={len(edges)}")
-
-def export_network_viz(env: dict, period: str | None = None) -> None:
-    """
-    Erstellt interaktive HTML-Netzwerkvisualisierung (PyVis)
-    aus vorbereiteten Topics-, Node- und Edge-Dateien.
-
-    Erwartet:
-      - nodes_topics.csv
-      - edges_topics.csv
-      - topic_colors.csv
-    Optional:
-      - period (z. B. '2001Q1') → verwendet periodenspezifische Dateien
-    """
-
+def export_network_viz(env,
+                       topic_filter=None,
+                       min_edge_weight=None,
+                       hide_self_loops=True,
+                       bg_color="#ffffff",
+                       max_width=8.0,
+                       width_quantile=0.9,
+                       height_px=900,
+                       hierarchical_direction="UD"):
     print("\n=== [export_network_viz] Start ===")
 
-    # === Pfade aus env ===
     org_dir = Path(env["outputs"]["org_dir"])
-    viz_dir = Path(env["outputs"].get("viz_dir", org_dir / "viz"))
-    viz_dir.mkdir(parents=True, exist_ok=True)
+    viz_dir = org_dir / "viz"
+    viz_dir.mkdir(exist_ok=True, parents=True)
 
-    # === Perioden-Erweiterung ===
-    suf = f"_{period}" if period else ""
-    nodes_path = viz_dir / f"nodes_topics{suf}.csv"
-    edges_path = viz_dir / f"edges_topics{suf}.csv"
-    colors_path = viz_dir / "topic_colors.csv"
-
-    # === Fallback, falls periodische Dateien fehlen ===
-    if not nodes_path.exists():
-        nodes_path = viz_dir / "nodes_topics.csv"
-    if not edges_path.exists():
-        edges_path = viz_dir / "edges_topics.csv"
-
-    for p in [nodes_path, edges_path]:
-        assert p.exists(), f"❌ Datei fehlt: {p}"
+    nodes_path = viz_dir / "nodes_topics.csv"
+    edges_path = viz_dir / "edges_topics.csv"
+    assert nodes_path.exists() and edges_path.exists(), "Fehlende Eingabedateien"
     print(f"[ok] Eingabedateien: {nodes_path.name}, {edges_path.name}")
 
     nodes = pd.read_csv(nodes_path)
     edges = pd.read_csv(edges_path)
-    colors = pd.read_csv(colors_path) if colors_path.exists() else pd.DataFrame()
-
     print(f"[load] nodes={len(nodes)} | edges={len(edges)}")
 
     # === Schema-Erkennung ===
-    src_col = "source" if "source" in edges.columns else "sender_cluster"
-    dst_col = "target" if "target" in edges.columns else "recipient_cluster"
-    topic_col = "topic_id" if "topic_id" in edges.columns else "thread_topic_id"
+    node_id_col = "node_id" if "node_id" in nodes.columns else (
+        "cluster_id" if "cluster_id" in nodes.columns else nodes.columns[0]
+    )
+    src_col = "source" if "source" in edges.columns else (
+        "sender_cluster" if "sender_cluster" in edges.columns else edges.columns[0]
+    )
+    dst_col = "target" if "target" in edges.columns else (
+        "recipient_cluster" if "recipient_cluster" in edges.columns else edges.columns[1]
+    )
+    weight_col = "weight" if "weight" in edges.columns else (
+        "w" if "w" in edges.columns else None
+    )
 
-    # === Fehlende Nodes ergänzen (damit keine Assertion mehr fliegt)
-    node_ids = set(nodes["node_id"].astype(str))
-    edge_nodes = set(edges[src_col].astype(str)) | set(edges[dst_col].astype(str))
-    missing = edge_nodes - node_ids
-    if missing:
-        print(f"⚠️ Ergänze {len(missing)} fehlende Nodes (z. B. aus tieferer Hierarchie)")
-        new_nodes = pd.DataFrame({
-            "node_id": list(missing),
-            "label": list(missing),
-            "level": "Lx",
-            "topics": "–"
-        })
-        nodes = pd.concat([nodes, new_nodes], ignore_index=True)
+    print(f"[info] node_id_col={node_id_col} | src_col={src_col} | dst_col={dst_col} | weight_col={weight_col}")
 
-    # === PyVis Setup ===
-    net = Network(height="900px", width="100%", directed=True, notebook=False, cdn_resources="in_line")
-    net.set_options("""
-    {
-      "layout": { "hierarchical": { "enabled": true, "direction": "UD",
-                                    "sortMethod": "hubsize", "nodeSpacing": 180,
-                                    "levelSeparation": 220 } },
-      "physics": { "enabled": false },
-      "interaction": { "hover": true, "tooltipDelay": 120 }
-    }
-    """)
+    # === Filtern & vorbereiten ===
+    if weight_col and min_edge_weight:
+        edges = edges[edges[weight_col] >= min_edge_weight]
+        print(f"[filter] edges >= {min_edge_weight}: {len(edges)}")
 
-    # === Nodes einfügen ===
+    if hide_self_loops:
+        edges = edges[edges[src_col] != edges[dst_col]]
+
+    edges[src_col] = edges[src_col].astype(str)
+    edges[dst_col] = edges[dst_col].astype(str)
+    nodes[node_id_col] = nodes[node_id_col].astype(str)
+
+    # === Netzwerk erstellen ===
+    net = Network(height=f"{height_px}px", width="100%", bgcolor=bg_color, directed=True)
+    net.barnes_hut(gravity=-80000, central_gravity=0.3, spring_length=120)
+
     for _, n in nodes.iterrows():
-        label = n.get("label", n["node_id"])
-        color = "#F9FAFB"
-        border = "#9CA3AF"
-        if isinstance(n.get("topics"), str) and len(n["topics"]) > 1:
-            label += f"\n{n['topics']}"
-        net.add_node(
-            n["node_id"], label=label, shape="box",
-            color={"background": color, "border": border},
-            font={"size": 16, "face": "arial"}
-        )
+        nid = n[node_id_col]
+        color = n.get("color", "#999999")
+        label = str(n.get("topic_name", nid))
+        size = np.sqrt(n.get("n_events", 5)) * 3
+        net.add_node(nid, label=label, color=color, size=size)
 
-    # === Edges hinzufügen ===
+    added = 0
     for _, e in edges.iterrows():
-        src = str(e[src_col])
-        dst = str(e[dst_col])
-        if src == dst:
-            arrows = "to"
-        else:
-            arrows = "to"
-
-        col = e.get("color", "#666")
+        src, dst = e[src_col], e[dst_col]
+        if src not in nodes[node_id_col].values or dst not in nodes[node_id_col].values:
+            continue
         width = float(e.get("width", 1.0))
-        label = str(e.get(topic_col, ""))
+        color = e.get("color", "#cccccc")
+        net.add_edge(src, dst, color=color, width=width)
+        added += 1
 
-        net.add_edge(src, dst, color=col, width=width, label=label, arrows=arrows, smooth=True, physics=False)
+    print(f"[done] Added {added}/{len(edges)} edges")
 
-    # === Export ===
-    ts = int(time.time())
-    html_name = f"org_topics_hier{('_' + period) if period else ''}_inline.html"
-    out_html = viz_dir / html_name
-    net.write_html(str(out_html))
+    # === Speichern ===
+    period = None
+    for f in viz_dir.glob("edges_topics_*.csv"):
+        p = f.stem.replace("edges_topics_", "")
+        if len(p) > 0:
+            period = p
+    suffix = f"_{period}" if period else ""
+    out_html = viz_dir / f"org_topics_hier{suffix}.html"
+    net.save_graph(str(out_html))
 
-    print(f"[done] {html_name} | nodes={len(nodes)} | edges={len(edges)} | missing={len(missing)}")
-    print(f"[open] {out_html}")
-
-
-if __name__ == "__main__":
-    from pipe.topics_flow.setup_env import setup_environment
-    env = setup_environment()
-    export_network_viz(env)
+    print(f"[write] {out_html}  | nodes={len(nodes)} edges={added}")
+    print("✅ [export_network_viz] fertig.")
