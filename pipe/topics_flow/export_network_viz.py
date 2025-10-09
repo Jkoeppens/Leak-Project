@@ -80,20 +80,21 @@ def export_network_viz(
         notebook=False
     )
 
+    import json
+
     # Hierarchisches Layout aktivieren
-    net.set_options(f"""
-    var options = {{
-      layout: {{
-        hierarchical: {{
-          direction: '{hierarchical_direction}',
-          sortMethod: 'directed'
-        }}
-      }},
-      physics: {{
-        enabled: false
-      }}
-    }}
-    """)
+    options = {
+      "layout": {
+        "hierarchical": {
+          "direction": hierarchical_direction,
+          "sortMethod": "directed"
+        }
+      },
+      "physics": {
+        "enabled": False
+      }
+    }
+    net.set_options(json.dumps(options))
 
     # === Knoten hinzufügen ===
     valid_nodes = set(nodes[node_id_col].astype(str))
