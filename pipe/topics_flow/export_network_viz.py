@@ -36,8 +36,8 @@ def export_network_viz(
     viz_dir = org_dir / "viz"
     viz_dir.mkdir(parents=True, exist_ok=True)
 
-    nodes_path  = viz_dir / "nodes_topics.csv"
-    edges_path  = viz_dir / "edges_topics.csv"
+    nodes_path = viz_dir / "nodes_topics.csv"
+    edges_path = viz_dir / "edges_topics.csv"
     labels_path = viz_dir / "cluster_labels.csv"
 
     assert nodes_path.exists(), f"❌ Datei fehlt: {nodes_path}"
@@ -51,16 +51,16 @@ def export_network_viz(
     # --- Labels laden (optional) ---
     label_map = {}
     if labels_path.exists():
-      labels_df = pd.read_csv(labels_path)
-      id_col    = next((c for c in ["id", "cluster_id", "node_id"] if c in labels_df.columns), None)
-      label_col = next((c for c in ["label", "topic_label"]              if c in labels_df.columns), None)
-      if id_col and label_col:
-          label_map = dict(zip(labels_df[id_col].astype(str), labels_df[label_col]))
-          print(f"[labels] Loaded {len(label_map)} labels from {labels_path.name} (columns: {id_col}, {label_col})")
-      else:
-          print(f"[warn] Keine passenden Spalten in cluster_labels.csv: {labels_df.columns.tolist()}")
+        labels_df = pd.read_csv(labels_path)
+        id_col = next((c for c in ["id", "cluster_id", "node_id"] if c in labels_df.columns), None)
+        label_col = next((c for c in ["label", "topic_label"] if c in labels_df.columns), None)
+        if id_col and label_col:
+            label_map = dict(zip(labels_df[id_col].astype(str), labels_df[label_col]))
+            print(f"[labels] Loaded {len(label_map)} labels from {labels_path.name} (columns: {id_col}, {label_col})")
+        else:
+            print(f"[warn] Keine passenden Spalten in cluster_labels.csv: {labels_df.columns.tolist()}")
     else:
-      print(f"[warn] cluster_labels.csv nicht gefunden unter {labels_path}")
+        print(f"[warn] cluster_labels.csv nicht gefunden unter {labels_path}")
 
     # --- Hilfsfunktion: hierarchische Labelsuche ---
     def find_hierarchical_label(node_id: str):
@@ -93,6 +93,7 @@ def export_network_viz(
         directed=True,
         notebook=False
     )
+
     options = {
         "layout": {"hierarchical": {"direction": hierarchical_direction, "sortMethod": "directed"}},
         "physics": {"enabled": False}
@@ -130,7 +131,7 @@ def export_network_viz(
         label = label or node_id
         short_label = (label[:80] + "…") if len(label) > 80 else label
 
-        # Bildpfad relativ zum HTML (wichtig, damit es außerhalb Colab lädt)
+        # Bildpfad relativ zum HTML (damit es auch lokal funktioniert)
         img_rel = None
         if node_id in pie_map:
             img_rel = os.path.relpath(pie_dir / pie_map[node_id], viz_dir)
