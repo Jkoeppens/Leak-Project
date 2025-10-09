@@ -1,277 +1,139 @@
+# === pipe/topics_flow/topic_flows.py ===
 """
-pipe.topic_flows
-================
-Verknüpft Events, Topics/MetaTopics und Hierarchie-Levels zu Kommunikationsflüssen
-zwischen Organisationseinheiten.  Erwartet die vorherigen Pipeline-Ergebnisse:
+Erzeugt Flüsse (Edges) zwischen organisationalen Clustern auf Basis
+von Events mit Topics. Unterstützt optional zeitliche Aggregation
+(periodisch oder rolling).
 
-- events_clean.csv, events_roots_for_topics.csv
-- events_topics_active.csv  (aus route_topics)
-- infomap_levels.csv        (hierarchische Ebenen pro E-Mail)
-- topic_info_* / labels_*   (Labels aus Topic-Modellen)
+Input:
+  - events_with_topics.csv
+  - infomap_levels.csv (zur Hierarchieprüfung)
 
-Erzeugt im reports/orgchart/:
-  - topic_flow_edges_by_level.csv
-  - topic_flow_edges_total.csv
-  - topic_distribution_by_sender_level.csv
-  - topic_distribution_by_recipient_level.csv
-  - events_with_thread_topics.csv
+Output:
+  - topic_flows_filtered.csv (oder topic_flows_filtered_YYYY-MM.csv)
+
+Voraussetzung:
+  setup_environment() liefert env mit:
+    env["paths"]["levels_csv"]
+    env["outputs"]["topics_dir"]
+    env["runtime"]["time_mode"] ∈ {"off","periodic","rolling"}
 """
 
-from pathlib import Path
 import pandas as pd
+from pathlib import Path
 import numpy as np
-import re, json
+import re
 
+# -----------------------------------------------------
+def topic_flows(env):
+    print("\n=== [topic_flows] Starte Verarbeitung ===")
 
-def topic_flows(env: dict) -> None:
-    # ---------------------------------------------------------------
-    # Pfade aus config
-    # ---------------------------------------------------------------
-    root_dir = Path(env["paths"]["root"])
-    clean_dir = Path(env["paths"]["clean_dir"])
     topics_dir = Path(env["outputs"]["topics_dir"])
-    org_dir = Path(env["outputs"]["org_dir"])
-    org_dir.mkdir(parents=True, exist_ok=True)
+    levels_csv = Path(env["paths"]["levels_csv"])
+    clean_dir = Path(env["paths"]["clean_dir"])
 
-    levels_csv_path = root_dir / "data_derived" / "infomap_levels.csv"
-    CLEAN_ALL = clean_dir / "events_clean.csv"
-    ROOTS_FOR_TOPICS = clean_dir / "events_roots_for_topics.csv"
-    TOPIC_EVENTS_ACT = topics_dir / "reduced" / "events_topics_active.csv"
+    # --- Eingabedateien ---
+    events_path = topics_dir / "events_with_topics.csv"
+    assert events_path.exists(), f"❌ fehlt: {events_path}"
 
-    LABELS_META_PREF = topics_dir / "reduced" / "topic_info_meta_labeled.csv"
-    LABELS_META_AUTO = topics_dir / "reduced" / "meta_labels_auto.csv"
-    LABELS_ORIG = topics_dir / "topic_info_labels.csv"
-    TOPIC_INFO_ORIG = topics_dir / "topic_info.csv"
+    print(f"[load] Events: {events_path}")
+    events = pd.read_csv(events_path, low_memory=False)
 
-    for p in [CLEAN_ALL, ROOTS_FOR_TOPICS, TOPIC_EVENTS_ACT, levels_csv_path]:
-        assert p.exists(), f"Datei fehlt: {p}"
+    # --- Robustheit: Spalten-Check ---
+    required_cols = {"sender_cluster", "recipient_cluster", "thread_topic_id"}
+    missing = required_cols - set(events.columns)
+    if missing:
+        raise ValueError(f"❌ Fehlende Spalten in events_with_topics.csv: {missing}")
 
-    # ---------------------------------------------------------------
-    # Helper
-    # ---------------------------------------------------------------
-    EMAIL_RE = re.compile(r'<?([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})>?', re.I)
+    # --- Optional: Datum vorbereiten ---
+    if "date" in events.columns:
+        events["date"] = pd.to_datetime(events["date"], errors="coerce")
+        events = events.dropna(subset=["date"])
+        events["period"] = events["date"].dt.to_period(env["runtime"].get("time_freq", "M"))
+    else:
+        events["period"] = "ALL"
 
-    def norm_email(x):
-        if pd.isna(x):
+    # --- Filter ---
+    # Nur relevante Flüsse behalten (Topic nicht NaN, Cluster definiert)
+    events = events.dropna(subset=["thread_topic_id", "sender_cluster", "recipient_cluster"])
+    events["thread_topic_id"] = events["thread_topic_id"].astype(int)
+
+    # --- Format-Korrektur für Cluster-IDs (str statt float) ---
+    def normalize_cluster_id(val):
+        if pd.isna(val):
             return None
-        s = str(x).strip().lower()
-        m = EMAIL_RE.search(s)
-        return m.group(1) if m else None
+        s = str(val).strip()
+        # Entferne Nachkommastellen, falls versehentlich numerisch
+        if re.match(r"^\d+(\.\d+)?$", s):
+            s = str(int(float(s)))
+        return s
 
-    def parse_list_maybe_json_safe(v):
-        if v is None or (isinstance(v, float) and np.isnan(v)):
-            return []
-        if isinstance(v, (list, tuple, set)):
-            return list(v)
-        if isinstance(v, str):
-            s = v.strip()
-            if s.startswith("[") and s.endswith("]"):
-                try:
-                    return json.loads(s)
-                except Exception:
-                    pass
-            parts = re.split(r"[;, ]+", s)
-            return [p for p in parts if "@" in p]
-        return []
+    events["sender_cluster"] = events["sender_cluster"].apply(normalize_cluster_id)
+    events["recipient_cluster"] = events["recipient_cluster"].apply(normalize_cluster_id)
 
-    def to_norm_sorted_unique_list(v):
-        out = []
-        for item in parse_list_maybe_json_safe(v):
-            e = norm_email(item)
-            if isinstance(e, str) and e:
-                out.append(e)
-        return sorted(set(out))
-
-    # ---------------------------------------------------------------
-    # Daten laden
-    # ---------------------------------------------------------------
-    events_all = pd.read_csv(CLEAN_ALL)
-    roots_df = pd.read_csv(ROOTS_FOR_TOPICS)
-    ev_topics = pd.read_csv(TOPIC_EVENTS_ACT)
-    levels = pd.read_csv(levels_csv_path)
-
-    # Vereinheitliche Schlüssel
-    eid_col = next((c for c in events_all.columns if c.lower() in {"event_id","id","eid"}), None)
-    events_all = events_all.rename(columns={eid_col: "event_id"})
-    assert {"is_thread_root","thread_id"}.issubset(events_all.columns)
-
-    if "event_id" not in ev_topics.columns:
-        e_eid = next((c for c in ev_topics.columns if c.lower() in {"event_id","id","eid"}), None)
-        ev_topics = ev_topics.rename(columns={e_eid:"event_id"})
-    assert "topic_active" in ev_topics.columns
-
-    # ---------------------------------------------------------------
-    # Thread-Topics propagieren
-    # ---------------------------------------------------------------
-    root_topics = ev_topics[["event_id","topic_active"]].copy()
-    thread_roots = events_all.loc[events_all["is_thread_root"], ["thread_id","event_id"]] \
-                             .rename(columns={"event_id":"root_event_id"})
-    thread_topic = (
-        thread_roots.merge(root_topics, left_on="root_event_id", right_on="event_id", how="left")
-                    .drop(columns=["event_id"])
-                    .rename(columns={"topic_active":"thread_topic_active"})
-    )
-    events_all = events_all.merge(thread_topic, on="thread_id", how="left")
-
-    # ---------------------------------------------------------------
-    # Email-Felder normalisieren
-    # ---------------------------------------------------------------
-    events_all["from_email_norm"] = events_all.get("from_email", np.nan).map(norm_email)
-    for col in ("to_emails","cc_emails","bcc_emails"):
-        if col not in events_all.columns:
-            events_all[col] = [[] for _ in range(len(events_all))]
-        events_all[col + "_norm"] = events_all[col].apply(to_norm_sorted_unique_list)
-
-    # ---------------------------------------------------------------
-    # Level-Map vorbereiten
-    # ---------------------------------------------------------------
-    level_key = None
-    for cand in ["email","mail","node","address","user","person"]:
-        mask = levels.columns.str.lower() == cand
-        if mask.any():
-            level_key = levels.columns[mask][0]
-            break
-    if level_key is None:
-        level_key = levels.columns[0]
-
-    levels["_key_email"] = levels[level_key].map(norm_email)
-    level_cols = [c for c in levels.columns if c not in (level_key, "_key_email")]
-    level_map = levels.set_index("_key_email")[level_cols]
-
-    def email_to_levels(email):
-        if not isinstance(email, str) or not email:
-            return {c: np.nan for c in level_cols}
-        try:
-            row = level_map.loc[email]
-            if isinstance(row, pd.Series):
-                return row.to_dict()
-            else:
-                return row.iloc[0].to_dict()
-        except KeyError:
-            return {c: np.nan for c in level_cols}
-
-    sender_levels = events_all["from_email_norm"].apply(email_to_levels).apply(pd.Series)
-    sender_levels.columns = [f"sender_{c}" for c in sender_levels.columns]
-    events_all = pd.concat([events_all, sender_levels], axis=1)
-
-    # ---------------------------------------------------------------
-    # Empfänger-Kanten erzeugen
-    # ---------------------------------------------------------------
-    def recipients_records(row):
-        recs = []
-        for role, lst in [("TO", row["to_emails_norm"]),
-                          ("CC", row["cc_emails_norm"]),
-                          ("BCC", row["bcc_emails_norm"])]:
-            for em in lst:
-                lv = email_to_levels(em)
-                rec = {
-                    "event_id": row["event_id"],
-                    "thread_id": row["thread_id"],
-                    "role": role,
-                    "recipient_email": em,
-                    "topic_active": row["thread_topic_active"],
-                    "is_newsletter": row.get("is_newsletter", False),
-                }
-                for c in sender_levels.columns:
-                    rec[c] = row[c]
-                for c in level_cols:
-                    rec[f"recipient_{c}"] = lv.get(c, np.nan)
-                recs.append(rec)
-        return recs
-
-    edge_rows = []
-    for _, r in events_all.iterrows():
-        edge_rows.extend(recipients_records(r))
-    edges = pd.DataFrame(edge_rows)
-
-    edges = edges[~edges["topic_active"].isna()]
-    if "is_newsletter" in edges.columns:
-        edges = edges[edges["is_newsletter"] == False]
-
-    # ---------------------------------------------------------------
-    # Aggregationen
-    # ---------------------------------------------------------------
-    LEVEL_DIM = level_cols[0]
-    s_col, r_col = f"sender_{LEVEL_DIM}", f"recipient_{LEVEL_DIM}"
-    edges["w"] = 1.0
-
-    flow = (edges.groupby([s_col, r_col, "topic_active"], dropna=False)["w"]
-                  .sum().reset_index().rename(columns={"w":"weight"}))
-    flow_total = (edges.groupby([s_col, r_col], dropna=False)["w"]
-                        .sum().reset_index().rename(columns={"w":"weight_total"}))
-
-    sender_topic = (edges.groupby([s_col, "topic_active"], dropna=False)["w"]
-                          .sum().reset_index(name="weight"))
-    recipient_topic = (edges.groupby([r_col, "topic_active"], dropna=False)["w"]
-                             .sum().reset_index(name="weight"))
-
-    def add_share(df, levelcol):
-        total = df.groupby(levelcol)["weight"].sum().rename("total")
-        out = df.merge(total, on=levelcol, how="left")
-        out["share"] = (out["weight"] / out["total"]).fillna(0.0)
-        return out.drop(columns=["total"])
-
-    sender_topic = add_share(sender_topic, s_col)
-    recipient_topic = add_share(recipient_topic, r_col)
-
-    # ---------------------------------------------------------------
-    # Topic-Labels mergen
-    # ---------------------------------------------------------------
-    def load_label_table() -> pd.DataFrame:
-        if LABELS_META_PREF.exists():
-            ti = pd.read_csv(LABELS_META_PREF).rename(columns={"MetaTopic":"topic_active","label":"topic_name_active"})
-            return ti[["topic_active","topic_name_active"]].drop_duplicates()
-        if LABELS_META_AUTO.exists():
-            ti = pd.read_csv(LABELS_META_AUTO)
-            col_id = "MetaTopic" if "MetaTopic" in ti.columns else "topic_meta"
-            col_lab = "label_1" if "label_1" in ti.columns else next(c for c in ti.columns if c.startswith("label"))
-            ti = ti.rename(columns={col_id:"topic_active", col_lab:"topic_name_active"})
-            return ti[["topic_active","topic_name_active"]].drop_duplicates()
-        if LABELS_ORIG.exists():
-            ti = pd.read_csv(LABELS_ORIG)
-            if "topic_label" in ti.columns:
-                ti = ti.rename(columns={"Topic":"topic_active","topic_label":"topic_name_active"})
-            else:
-                ti = ti.rename(columns={"Topic":"topic_active","Name":"topic_name_active"})
-            return ti[["topic_active","topic_name_active"]].drop_duplicates()
-        if TOPIC_INFO_ORIG.exists():
-            ti = pd.read_csv(TOPIC_INFO_ORIG).rename(columns={"Topic":"topic_active","Name":"topic_name_active"})
-            return ti[["topic_active","topic_name_active"]].drop_duplicates()
-        return pd.DataFrame({"topic_active":[],"topic_name_active":[]})
-
-    ti = load_label_table()
-
-    def with_labels(df):
-        if len(ti) == 0:
-            return df
-        return df.merge(ti, on="topic_active", how="left")
-
-    flow_labeled = with_labels(flow)
-    sender_topic_labeled = with_labels(sender_topic)
-    recipient_topic_labeled = with_labels(recipient_topic)
-
-    # ---------------------------------------------------------------
-    # Outputs
-    # ---------------------------------------------------------------
-    flow_labeled.to_csv(org_dir / "topic_flow_edges_by_level.csv", index=False)
-    flow_total.to_csv(org_dir / "topic_flow_edges_total.csv", index=False)
-    sender_topic_labeled.to_csv(org_dir / "topic_distribution_by_sender_level.csv", index=False)
-    recipient_topic_labeled.to_csv(org_dir / "topic_distribution_by_recipient_level.csv", index=False)
-    events_all[["event_id","thread_id","thread_topic_active"]].to_csv(
-        org_dir / "events_with_thread_topics.csv", index=False
+    # --- Aggregation ---
+    time_mode = env["runtime"].get("time_mode", "off")
+    group_cols = (
+        ["period", "sender_cluster", "recipient_cluster", "thread_topic_id"]
+        if time_mode != "off"
+        else ["sender_cluster", "recipient_cluster", "thread_topic_id"]
     )
 
-    print("\n=== Flow-Beispiel (erste 8 Kanten) ===")
-    print(flow_labeled.head(8).to_string(index=False))
-    print("\n=== Top 10 Sender-Level x Topic ===")
-    print(sender_topic_labeled.sort_values("weight", ascending=False).head(10).to_string(index=False))
-    print("\n[write]", org_dir / "topic_flow_edges_by_level.csv")
-    print("[write]", org_dir / "topic_flow_edges_total.csv")
-    print("[write]", org_dir / "topic_distribution_by_sender_level.csv")
-    print("[write]", org_dir / "topic_distribution_by_recipient_level.csv")
-    print("[write]", org_dir / "events_with_thread_topics.csv")
+    print(f"[agg] Gruppiere über: {group_cols}")
+    flows = (
+        events.groupby(group_cols)
+        .agg(
+            weight=("thread_topic_id", "count"),
+            n_events=("thread_topic_id", "count")
+        )
+        .reset_index()
+    )
+
+    # --- Filter nach Gewicht ---
+    min_weight = env.get("thresholds", {}).get("min_flow_weight", 3)
+    flows = flows[flows["weight"] >= min_weight]
+    print(f"[filter] Flüsse >= {min_weight} behalten → {len(flows)} Zeilen")
+
+    # --- Farben & Format vorbereiten ---
+    flows["color"] = "#1f77b4"
+    flows["width"] = np.sqrt(flows["weight"]) / 4.0
+    flows["edge_id"] = (
+        flows["sender_cluster"].astype(str)
+        + "||"
+        + flows["recipient_cluster"].astype(str)
+        + "||"
+        + flows["thread_topic_id"].astype(str)
+    )
+
+    # --- Sanity: Hierarchieprüfung ---
+    if levels_csv.exists():
+        H = pd.read_csv(levels_csv)
+        known_clusters = set(H.iloc[:, -1].astype(str).unique())
+        missing_src = set(flows["sender_cluster"]) - known_clusters
+        missing_dst = set(flows["recipient_cluster"]) - known_clusters
+        if missing_src or missing_dst:
+            print(
+                f"[warn] {len(missing_src)} unbekannte Sender, "
+                f"{len(missing_dst)} unbekannte Empfänger in Hierarchie"
+            )
+
+    # --- Export ---
+    topics_dir.mkdir(parents=True, exist_ok=True)
+
+    if time_mode == "off":
+        out_path = topics_dir / "topic_flows_filtered.csv"
+        flows.to_csv(out_path, index=False)
+        print(f"[save] {out_path} ({len(flows)} Zeilen)")
+    else:
+        for p, sub in flows.groupby("period"):
+            out_path = topics_dir / f"topic_flows_filtered_{p}.csv"
+            sub.to_csv(out_path, index=False)
+        print(f"[save] {len(flows)} Zeilen in periodischen Dateien exportiert")
+
+    print("✅ [topic_flows] abgeschlossen.")
+    return flows
 
 
+# -----------------------------------------------------
 if __name__ == "__main__":
     from pipe.topics_flow.setup_env import setup_environment
     env = setup_environment()
