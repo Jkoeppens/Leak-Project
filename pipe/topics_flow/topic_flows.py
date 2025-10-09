@@ -6,151 +6,149 @@ basierend auf Ereignissen (z. B. E-Mail-Threads oder Meetings).
 Input:
   - cluster_topic_pies_summary.csv
   - topic_distribution_by_level.csv
-  - infomap_levels.csv
-  - (optional) events_with_topics.csv mit Datumsspalte für Rolling Window
+  - events_with_topics.csv (optional)
+  - infomap_levels.csv (zur Hierarchieprüfung)
+  - topic_info_labels.csv (mit Spalten: Topic, Name, topic_label)
 
 Output:
-  - topic_flows_filtered.csv (bereit für Visualisierung)
-
-Optional:
-  - `period` Parameter (z. B. '2001-Q1', '2002', '2000-01-01_2000-03-31')
-    um Rolling-Zeiträume zu erzeugen oder Teilmengen zu filtern.
+  - topic_flows_filtered.csv
+  - optional mit Perioden-Suffix (z. B. topic_flows_filtered_2001Q1.csv)
 """
 
 import pandas as pd
 from pathlib import Path
-import numpy as np
+import os
+import time
 
-# -----------------------------------------------------------------------------
-# Hilfsfunktionen
-# -----------------------------------------------------------------------------
 
+# --------------------------------------------------
+# Helper: Lade Topic-Label-Tabelle (robust)
+# --------------------------------------------------
 def load_label_table(env):
-    """Lädt Topic-Labels aus topic_info_labels.csv im modernen oder alten Format."""
     topics_dir = Path(env["outputs"]["topics_dir"])
-    ti_path = topics_dir / "topic_info_labels.csv"
-    assert ti_path.exists(), f"❌ Datei fehlt: {ti_path}"
+    label_path = topics_dir / "topic_info_labels.csv"
+    assert label_path.exists(), f"❌ Datei fehlt: {label_path}"
 
-    ti = pd.read_csv(ti_path)
-    cols = set(ti.columns)
-
+    df = pd.read_csv(label_path)
+    cols = set(df.columns)
     if {"Topic", "Name"}.issubset(cols):
-        df = ti[["Topic", "Name"]].rename(
-            columns={"Topic": "topic_active", "Name": "topic_name_active"}
-        ).drop_duplicates()
+        df = df.rename(columns={"Topic": "topic_active", "Name": "topic_name_active"})
     elif {"topic_active", "topic_name_active"}.issubset(cols):
-        df = ti[["topic_active", "topic_name_active"]].drop_duplicates()
+        pass  # schon richtig
+    elif {"Topic", "topic_label"}.issubset(cols):
+        df = df.rename(columns={"Topic": "topic_active", "topic_label": "topic_name_active"})
     else:
-        raise ValueError(f"❌ Unbekannte Spalten in topic_info_labels.csv: {list(cols)}")
+        raise ValueError(f"⚠️ Unbekanntes Schema für topic_info_labels.csv: {list(df.columns)}")
 
-    print(f"[ok] Loaded topic label table with {len(df)} rows.")
-    return df
-
-
-def load_flows_input(env):
-    """Lädt Pies und Hierarchieinformationen."""
-    org_dir = Path(env["outputs"]["org_dir"])
-    pies_summary = pd.read_csv(org_dir / "cluster_topic_pies_summary.csv")
-    levels_csv = Path(env["paths"]["levels_csv"])
-    levels = pd.read_csv(levels_csv)
-    return pies_summary, levels
+    return df[["topic_active", "topic_name_active"]].drop_duplicates()
 
 
-def ensure_datetime(df, col="date"):
-    """Versucht, eine Datumsspalte sicher zu konvertieren."""
-    if col in df.columns:
-        df[col] = pd.to_datetime(df[col], errors="coerce")
-    return df
-
-
-def filter_by_period(df, period=None, date_col="date"):
-    """Filtert ein DataFrame nach einem Zeitfenster oder Quartal."""
-    if not period or date_col not in df.columns:
-        return df
-
-    if "_" in period:  # expliziter Bereich: "YYYY-MM-DD_YYYY-MM-DD"
-        start, end = period.split("_")
-        mask = (df[date_col] >= pd.to_datetime(start)) & (df[date_col] <= pd.to_datetime(end))
-        return df.loc[mask]
-    elif "-" in period and len(period) == 7:  # Jahr-Monat
-        year, month = period.split("-")
-        return df[df[date_col].dt.to_period("M") == f"{year}-{month}"]
-    elif "-" not in period and len(period) == 4:  # Jahr
-        return df[df[date_col].dt.year == int(period)]
-    elif "Q" in period:  # Quartal
-        return df[df[date_col].dt.to_period("Q").astype(str) == period]
-    return df
-
-
-# -----------------------------------------------------------------------------
+# --------------------------------------------------
 # Hauptfunktion
-# -----------------------------------------------------------------------------
-
+# --------------------------------------------------
 def topic_flows(env: dict, period: str | None = None) -> None:
-    print(f"\n=== [topic_flows] Start (period={period}) ===")
+    print("\n=== [topic_flows] Start ===")
+    t0 = time.time()
 
     org_dir = Path(env["outputs"]["org_dir"])
     topics_dir = Path(env["outputs"]["topics_dir"])
-    levels_csv = Path(env["paths"]["levels_csv"])
+    clean_dir = Path(env["paths"]["clean_dir"])
 
     pies_summary_path = org_dir / "cluster_topic_pies_summary.csv"
-    assert pies_summary_path.exists(), f"❌ Datei fehlt: {pies_summary_path}"
+    topic_dist_path = org_dir / "topic_distribution_by_level.csv"
+    levels_path = Path(env["paths"]["levels_csv"])
+    events_with_topics_path = topics_dir / "events_with_topics.csv"
 
-    flows_out = org_dir / "topic_flows_filtered.csv"
+    # --------------------------------------------------
+    # Eingabeprüfung
+    # --------------------------------------------------
+    for p in [pies_summary_path, topic_dist_path, levels_path]:
+        assert p.exists(), f"❌ Datei fehlt: {p}"
+    if not events_with_topics_path.exists():
+        print(f"⚠️ Hinweis: events_with_topics.csv nicht gefunden → wird übersprungen")
 
-    # ---- Lade Daten ----
-    pies_summary, levels = load_flows_input(env)
+    print("[ok] Eingabedateien gefunden")
+
+    # --------------------------------------------------
+    # Daten laden
+    # --------------------------------------------------
+    pies = pd.read_csv(pies_summary_path)
+    levels = pd.read_csv(levels_path)
     label_table = load_label_table(env)
 
-    # ---- Cluster-IDs & Topics ----
-    flows = pies_summary[["cluster_id", "thread_topic_id", "weight", "n_events"]].copy()
-    flows.rename(columns={"cluster_id": "sender_cluster"}, inplace=True)
-
-    # Dummy-Empfänger auf gleicher Ebene simulieren (wenn keine echte Interaktion vorhanden)
-    flows["recipient_cluster"] = flows["sender_cluster"]
-    flows = flows.merge(label_table, left_on="thread_topic_id", right_on="topic_active", how="left")
-
-    # ---- Falls Rolling Period aktiv ----
-    ev_path = topics_dir / "events_with_topics.csv"
-    if ev_path.exists():
-        ev = pd.read_csv(ev_path)
-        ev = ensure_datetime(ev, "date")
-        ev = filter_by_period(ev, period, "date")
-        print(f"[filter] Events gefiltert auf {len(ev)} Zeilen für period={period}")
-    else:
-        print("[warn] Keine events_with_topics.csv gefunden – period-Filter übersprungen.")
-
-    # ---- Edge-Tabelle ----
-    edges = flows.groupby(
-        ["sender_cluster", "recipient_cluster", "thread_topic_id"], as_index=False
-    ).agg({"weight": "sum", "n_events": "sum"})
-
-    edges["color"] = "#1f77b4"
-    edges["width"] = np.maximum(1.0, edges["weight"] / 10000.0)
-    edges["edge_id"] = (
-        edges["sender_cluster"].astype(str)
-        + "||"
-        + edges["recipient_cluster"].astype(str)
-        + "||"
-        + edges["thread_topic_id"].astype(str)
+    # Optional Events (falls vorhanden)
+    ev_topics = (
+        pd.read_csv(events_with_topics_path)
+        if events_with_topics_path.exists()
+        else pd.DataFrame(columns=["event_id", "thread_topic_id", "sender_cluster", "recipient_cluster"])
     )
 
-    print(f"[ok] {len(edges)} edges erzeugt | Spalten: {list(edges.columns)}")
+    print(f"[load] pies={len(pies):,} | levels={len(levels):,} | events={len(ev_topics):,}")
 
-    # ---- Speichern ----
-    flows_out.parent.mkdir(parents=True, exist_ok=True)
-    edges.to_csv(flows_out, index=False)
-    print(f"[save] {flows_out}")
+    # --------------------------------------------------
+    # Falls period angegeben, filtere Events
+    # --------------------------------------------------
+    if period and "timestamp" in ev_topics.columns:
+        ev_topics["timestamp"] = pd.to_datetime(ev_topics["timestamp"], errors="coerce")
+        mask = ev_topics["timestamp"].dt.to_period(period.split('-')[0])  # z. B. "2001Q1"
+        ev_topics = ev_topics[mask.astype(str) == period]
+        print(f"[filter] Zeitraum {period}: {len(ev_topics):,} Events")
 
+    # --------------------------------------------------
+    # Cluster-Zuordnung (vereinfachte Struktur)
+    # --------------------------------------------------
+    pies = pies.rename(columns={"cluster_id": "sender_cluster", "thread_topic_id": "thread_topic_id"})
+    pies["recipient_cluster"] = pies["sender_cluster"]
+    pies["weight"] = pies["weight"].fillna(0)
+
+    # --------------------------------------------------
+    # Flows bilden
+    # --------------------------------------------------
+    flows = pies.groupby(["sender_cluster", "recipient_cluster", "thread_topic_id"], as_index=False)["weight"].sum()
+    flows["n_events"] = flows["weight"].round().astype(int)
+    flows = flows.rename(columns={"thread_topic_id": "topic_active"})
+    print(f"[flows] {len(flows):,} Kanten")
+
+    # --------------------------------------------------
+    # Labels joinen
+    # --------------------------------------------------
+    flows = flows.merge(label_table, on="topic_active", how="left")
+    missing_labels = flows["topic_name_active"].isna().sum()
+    if missing_labels > 0:
+        print(f"⚠️ {missing_labels} Topics ohne Label – werden ignoriert")
+
+    # --------------------------------------------------
+    # Metadaten / Visual-Daten
+    # --------------------------------------------------
+    flows["color"] = "#1f77b4"
+    flows["width"] = flows["weight"] / flows["weight"].max() * 8
+    flows["edge_id"] = (
+        flows["sender_cluster"].astype(str)
+        + "||"
+        + flows["recipient_cluster"].astype(str)
+        + "||"
+        + flows["topic_active"].astype(str)
+    )
+
+    # --------------------------------------------------
+    # Output schreiben
+    # --------------------------------------------------
+    out_path = org_dir / "topic_flows_filtered.csv"
+    if period:
+        out_path = org_dir / f"topic_flows_filtered_{period.replace('-', '').replace('_', '')}.csv"
+
+    flows.to_csv(out_path, index=False)
+    print(f"[save] {out_path.name}  |  rows={len(flows):,}")
+
+    print(f"[done] Dauer: {time.time()-t0:.1f}s")
     print("✅ [topic_flows] abgeschlossen.")
+    return flows
 
 
-# -----------------------------------------------------------------------------
-# CLI Entry
-# -----------------------------------------------------------------------------
-
+# --------------------------------------------------
+# CLI / Run Support
+# --------------------------------------------------
 if __name__ == "__main__":
     from pipe.topics_flow.setup_env import setup_environment
-
     env = setup_environment()
     topic_flows(env)
