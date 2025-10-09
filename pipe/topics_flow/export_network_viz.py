@@ -1,13 +1,13 @@
-# === export_network_viz_colab.py ===
+# === pipe/topics_flow/export_network_viz.py ===
 import os
 import json
 import pandas as pd
 from pathlib import Path
 from pyvis.network import Network
-from IPython.display import IFrame, display
 
-def export_network_viz_colab(
-    base_dir="/content",
+
+def export_network_viz(
+    env,
     topic_filter=None,
     min_edge_weight=None,
     hide_self_loops=True,
@@ -19,16 +19,21 @@ def export_network_viz_colab(
     debug=False
 ):
     """
-    Exportiert ein interaktives pyvis-Netzwerk (vis.js) im Colab-Kontext.
-    Voraussetzungen:
-      - Dateien: /content/viz/nodes_topics.csv, edges_topics.csv, optional cluster_labels.csv
-      - erzeugt: /content/viz/org_topics_hier.html
+    Exportiert ein interaktives vis-network (pyvis) HTML.
+
+    Features:
+      - erkennt automatisch Spaltennamen in nodes_topics.csv / edges_topics.csv
+      - liest cluster_labels.csv (id,label) zur Beschriftung
+      - nutzt hierarchische Label-Suche (Präfix-Matching bei ":"-IDs)
+      - bindet Mini-Pies aus viz/pies/ als Node-Icons ein (falls vorhanden)
+      - Debug-Modus mit Statistik zu Label-Matches
     """
 
-    print("\n=== [export_network_viz_colab] Start ===")
+    print("\n=== [export_network_viz] Start ===")
 
     # --- Pfade ---
-    viz_dir = Path(base_dir) / "viz"
+    org_dir = Path(env["outputs"]["org_dir"])
+    viz_dir = org_dir / "viz"
     viz_dir.mkdir(parents=True, exist_ok=True)
 
     nodes_path = viz_dir / "nodes_topics.csv"
@@ -43,7 +48,7 @@ def export_network_viz_colab(
     edges = pd.read_csv(edges_path)
     print(f"[load] nodes={len(nodes)} | edges={len(edges)}")
 
-    # --- Labels laden ---
+    # --- Labels laden (optional) ---
     label_map = {}
     if labels_path.exists():
         labels_df = pd.read_csv(labels_path)
@@ -51,7 +56,7 @@ def export_network_viz_colab(
         label_col = next((c for c in ["label", "topic_label"] if c in labels_df.columns), None)
         if id_col and label_col:
             label_map = dict(zip(labels_df[id_col].astype(str), labels_df[label_col]))
-            print(f"[labels] Loaded {len(label_map)} labels (columns: {id_col}, {label_col})")
+            print(f"[labels] Loaded {len(label_map)} labels from {labels_path.name} (columns: {id_col}, {label_col})")
         else:
             print(f"[warn] Keine passenden Spalten in cluster_labels.csv: {labels_df.columns.tolist()}")
     else:
@@ -95,7 +100,7 @@ def export_network_viz_colab(
     }
     net.set_options(json.dumps(options))
 
-    # --- Pies laden ---
+    # --- Pies laden (optional) ---
     pie_dir = viz_dir / "pies"
     pie_index_path = pie_dir / "cluster_pies_index.csv"
     pie_map = {}
@@ -114,6 +119,7 @@ def export_network_viz_colab(
         node_id = str(row[node_id_col]).strip()
         group = row.get("group", "org_cluster")
 
+        # Label bestimmen
         label = label_map.get(node_id)
         if label is not None:
             exact_match += 1
@@ -125,6 +131,7 @@ def export_network_viz_colab(
         label = label or node_id
         short_label = (label[:80] + "…") if len(label) > 80 else label
 
+        # Bildpfad relativ zum HTML (damit es auch lokal funktioniert)
         img_rel = None
         if node_id in pie_map:
             img_rel = os.path.relpath(pie_dir / pie_map[node_id], viz_dir)
@@ -147,16 +154,16 @@ def export_network_viz_colab(
     added_edges = 0
     skipped_edges = []
     for _, e in edges.iterrows():
-            src = str(e[src_col]).strip()
-            dst = str(e[dst_col]).strip()
-            if hide_self_loops and src == dst:
-                skipped_edges.append((src, dst, "self-loop"))
-                continue
-            if src not in valid_nodes or dst not in valid_nodes:
-                skipped_edges.append((src, dst, "missing node"))
-                continue
+        src = str(e[src_col]).strip()
+        dst = str(e[dst_col]).strip()
+        if hide_self_loops and src == dst:
+            skipped_edges.append((src, dst, "self-loop"))
+            continue
+        if src not in valid_nodes or dst not in valid_nodes:
+            skipped_edges.append((src, dst, "missing node"))
+            continue
 
-            w = e.get(weight_col, 1.0)
+        w = e.get(weight_col, 1.0)
         color = e.get("color", "#999999")
         net.add_edge(src, dst, value=float(w), color=color)
         added_edges += 1
@@ -172,15 +179,10 @@ def export_network_viz_colab(
     out_html = viz_dir / "org_topics_hier.html"
     net.save_graph(str(out_html))
     print(f"[write] {out_html}  | nodes={len(nodes)} edges={added_edges}")
-    print("✅ [export_network_viz_colab] fertig.")
+    print("✅ [export_network_viz] fertig.")
 
-    # --- Anzeige / Download ---
-    display(IFrame(src=str(out_html), width="100%", height=height_px))
-    print(f"💾 Download-Link: {out_html}")
 
-# Beispielaufruf:
-# (nachdem du deine CSV-Dateien hochgeladen hast)
-# from google.colab import files
-# files.upload()  # Lade nodes_topics.csv, edges_topics.csv etc. hoch
-#
-# export_network_viz_colab(debug=True)
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    export_network_viz(env, debug=True)
