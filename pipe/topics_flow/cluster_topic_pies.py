@@ -134,7 +134,15 @@ def cluster_topic_pies(env):
             sub.to_csv(make_output("cluster_topic_pies", p), index=False)
         for p, sub in pies_summary.groupby("period"):
             sub.to_csv(make_output("cluster_topic_pies_summary", p), index=False)
-
+    # --- Optionaler Mini-Pie-Export (Hook) ---
+    if env["runtime"].get("export_pies", False):
+        try:
+            from pipe.topics_flow.utils import export_cluster_pies
+            viz_dir = org_dir / "viz" / "pies"
+            export_cluster_pies(pies, viz_dir)
+            print(f"[viz] Mini-Pies exportiert nach {viz_dir}")
+        except Exception as e:
+            print(f"[warn] Mini-Pie-Export übersprungen: {e}")
     print(f"[done] {len(pies_summary)} Cluster-Topic-Zusammenfassungen exportiert")
     print("✅ [cluster_topic_pies] abgeschlossen.")
     return pies, pies_summary
