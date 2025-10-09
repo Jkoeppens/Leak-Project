@@ -147,16 +147,16 @@ def export_network_viz_colab(
     added_edges = 0
     skipped_edges = []
     for _, e in edges.iterrows():
-        src = str(e[src_col]).strip()
-        dst = str(e[dst_col]).strip()
-        if hide_self_loops and src == dst:
-            skipped_edges.append((src, dst, "self-loop"))
-            continue
-        if src not in valid_nodes or dst not in valid_nodes:
-            skipped_edges.append((src, dst, "missing node"))
-            continue
+            src = str(e[src_col]).strip()
+            dst = str(e[dst_col]).strip()
+            if hide_self_loops and src == dst:
+                skipped_edges.append((src, dst, "self-loop"))
+                continue
+            if src not in valid_nodes or dst not in valid_nodes:
+                skipped_edges.append((src, dst, "missing node"))
+                continue
 
-        w = e.get(weight_col, 1.0)
+            w = e.get(weight_col, 1.0)
         color = e.get("color", "#999999")
         net.add_edge(src, dst, value=float(w), color=color)
         added_edges += 1
