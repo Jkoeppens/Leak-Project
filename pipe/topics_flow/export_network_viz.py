@@ -20,7 +20,6 @@ def export_network_viz(
 ):
     """
     Exportiert ein interaktives vis-network (pyvis) HTML.
-
     Features:
       - erkennt automatisch Spaltennamen in nodes_topics.csv / edges_topics.csv
       - liest cluster_labels.csv (id,label) zur Beschriftung
@@ -48,7 +47,7 @@ def export_network_viz(
     edges = pd.read_csv(edges_path)
     print(f"[load] nodes={len(nodes)} | edges={len(edges)}")
 
-    # --- Labels laden (optional) ---
+    # --- Labels laden ---
     label_map = {}
     if labels_path.exists():
         labels_df = pd.read_csv(labels_path)
@@ -100,7 +99,7 @@ def export_network_viz(
     }
     net.set_options(json.dumps(options))
 
-    # --- Pies laden (optional) ---
+    # --- Pies laden ---
     pie_dir = viz_dir / "pies"
     pie_index_path = pie_dir / "cluster_pies_index.csv"
     pie_map = {}
@@ -119,7 +118,6 @@ def export_network_viz(
         node_id = str(row[node_id_col]).strip()
         group = row.get("group", "org_cluster")
 
-        # Label bestimmen
         label = label_map.get(node_id)
         if label is not None:
             exact_match += 1
@@ -131,7 +129,6 @@ def export_network_viz(
         label = label or node_id
         short_label = (label[:80] + "…") if len(label) > 80 else label
 
-        # Bildpfad relativ zum HTML (damit es auch lokal funktioniert)
         img_rel = None
         if node_id in pie_map:
             img_rel = os.path.relpath(pie_dir / pie_map[node_id], viz_dir)
