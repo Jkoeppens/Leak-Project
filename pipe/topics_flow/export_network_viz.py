@@ -1,13 +1,13 @@
-# === pipe/topics_flow/export_network_viz.py ===
+# === export_network_viz_colab.py ===
 import os
 import json
 import pandas as pd
 from pathlib import Path
 from pyvis.network import Network
+from IPython.display import IFrame, display
 
-
-def export_network_viz(
-    env,
+def export_network_viz_colab(
+    base_dir="/content",
     topic_filter=None,
     min_edge_weight=None,
     hide_self_loops=True,
@@ -19,20 +19,16 @@ def export_network_viz(
     debug=False
 ):
     """
-    Exportiert ein interaktives vis-network (pyvis) HTML.
-    Features:
-      - erkennt automatisch Spaltennamen in nodes_topics.csv / edges_topics.csv
-      - liest cluster_labels.csv (id,label) zur Beschriftung
-      - nutzt hierarchische Label-Suche (Präfix-Matching bei ":"-IDs)
-      - bindet Mini-Pies aus viz/pies/ als Node-Icons ein (falls vorhanden)
-      - Debug-Modus mit Statistik zu Label-Matches
+    Exportiert ein interaktives pyvis-Netzwerk (vis.js) im Colab-Kontext.
+    Voraussetzungen:
+      - Dateien: /content/viz/nodes_topics.csv, edges_topics.csv, optional cluster_labels.csv
+      - erzeugt: /content/viz/org_topics_hier.html
     """
 
-    print("\n=== [export_network_viz] Start ===")
+    print("\n=== [export_network_viz_colab] Start ===")
 
     # --- Pfade ---
-    org_dir = Path(env["outputs"]["org_dir"])
-    viz_dir = org_dir / "viz"
+    viz_dir = Path(base_dir) / "viz"
     viz_dir.mkdir(parents=True, exist_ok=True)
 
     nodes_path = viz_dir / "nodes_topics.csv"
@@ -55,7 +51,7 @@ def export_network_viz(
         label_col = next((c for c in ["label", "topic_label"] if c in labels_df.columns), None)
         if id_col and label_col:
             label_map = dict(zip(labels_df[id_col].astype(str), labels_df[label_col]))
-            print(f"[labels] Loaded {len(label_map)} labels from {labels_path.name} (columns: {id_col}, {label_col})")
+            print(f"[labels] Loaded {len(label_map)} labels (columns: {id_col}, {label_col})")
         else:
             print(f"[warn] Keine passenden Spalten in cluster_labels.csv: {labels_df.columns.tolist()}")
     else:
@@ -176,10 +172,15 @@ def export_network_viz(
     out_html = viz_dir / "org_topics_hier.html"
     net.save_graph(str(out_html))
     print(f"[write] {out_html}  | nodes={len(nodes)} edges={added_edges}")
-    print("✅ [export_network_viz] fertig.")
+    print("✅ [export_network_viz_colab] fertig.")
 
+    # --- Anzeige / Download ---
+    display(IFrame(src=str(out_html), width="100%", height=height_px))
+    print(f"💾 Download-Link: {out_html}")
 
-if __name__ == "__main__":
-    from pipe.topics_flow.setup_env import setup_environment
-    env = setup_environment()
-    export_network_viz(env, debug=True)
+# Beispielaufruf:
+# (nachdem du deine CSV-Dateien hochgeladen hast)
+# from google.colab import files
+# files.upload()  # Lade nodes_topics.csv, edges_topics.csv etc. hoch
+#
+# export_network_viz_colab(debug=True)
