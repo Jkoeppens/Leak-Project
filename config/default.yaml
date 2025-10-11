@@ -1,23 +1,22 @@
 paths:
   root: "{root}"
-  raw_dir: "{root}/data_raw"          # hier legst du die Quell-Dateien in Drive ab
-  clean_dir: "{root}/data_clean"      # hier landen events.csv / event_actor.csv
+  raw_dir: "{root}/data_raw"                  # Eingangsdaten
+  clean_dir: "{root}/data_clean"              # Output: events.csv / event_actor.csv
   edges: "{root}/data_derived/edges_person.csv"
-  persons: "{root}/data_derived/persons.csv"
-  levels: "{root}/data_derived/infomap_levels.csv"
   edges_prepared: "{root}/data_derived/edges_person_prepared.csv"
-  persons: "{root}/data_derived/persons.csv" 
+  levels: "{root}/data_derived/infomap_levels.csv"
+  levels_csv: "{root}/data_derived/infomap_levels.csv"  # alias für Kompatibilität
+  persons: "{root}/data_derived/persons.csv"
 
 ingest:
-  input_subdir: "sample"              # relativ zu paths.raw_dir (z.B. "enron_mbox" o.ä.)
+  input_subdir: "sample"              # relativ zu paths.raw_dir
   progress_every: 500
-  keep_body_text: false               # ggf. auf true setzen; Achtung: Datenschutz
-  body_text_max_chars: 5000           # Trunkierung, falls keep_body_text=true
-
+  keep_body_text: false
+  body_text_max_chars: 5000
 
 filters:
   internal:
-    mode: "outside_supernode"   # include | outside_supernode | exclude
+    mode: "outside_supernode"         # include | outside_supernode | exclude
     domains: ["@enron.com"]
     outside_label: "Outside world"
     allow_external_leaders: false
@@ -25,7 +24,7 @@ filters:
     min_weight: 1
     require_reciprocal: false
   subgraph:
-    seed_emails: []             # z.B. ["ceo@enron.com"]
+    seed_emails: []                   # z.B. ["ceo@enron.com"]
     hops: 0
 
 selection:
@@ -45,7 +44,7 @@ thresholds:
   pct_l2: 99.0
   pct_l3: 98.0
   z_min_l3_for_plot: 0.0
-  n_execs: 8      # wie viele globale Execs (höchstes Global-Degree)
+  n_execs: 8
 
 runtime:
   random_seed: 42
@@ -53,7 +52,19 @@ runtime:
 
 outputs:
   cutoffs_dir: "{root}/reports/cutoffs"
-  signif_dir:  "{root}/reports/significance"
-  org_dir:     "{root}/reports/orgchart"
-  topics_dir:  "{root}/reports/topics"
+  signif_dir: "{root}/reports/significance"
+  org_dir: "{root}/reports/orgchart"
+  topics_dir: "{root}/reports/topics"
   diagnostics_dir: "{root}/reports/diagnostics"
+
+  # 👉 Erweiterte Unterverzeichnisse laut Audit
+  org_dir_viz: "{root}/reports/orgchart/viz"
+  org_dir_viz_pies: "{root}/reports/orgchart/viz/pies"
+  topics_dir_reduced: "{root}/reports/topics/reduced"
+
+reports:
+  orgchart:
+    path: "{root}/reports/orgchart"
+    cutoffs: "{root}/reports/orgchart/cutoffs"
+    viz: "{root}/reports/orgchart/viz"
+    pies: "{root}/reports/orgchart/viz/pies"
