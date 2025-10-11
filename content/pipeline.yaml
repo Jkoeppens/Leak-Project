@@ -481,11 +481,11 @@ modules:
         - name: cluster_labels.csv
           type: csv
           source: outputs.org_dir/viz
-          desc: Optional: Mapping von Cluster-IDs zu Labels
+          desc: Optional Mapping von Cluster-IDs zu Labels
         - name: cluster_pies_index.csv
           type: csv
           source: outputs.org_dir/viz/pies
-          desc: Optional: Mini-Pie-Images pro Cluster
+          desc: Optional Mini-Pie-Images pro Cluster
       use:
         - name: pyvis.network.Network
           type: library
