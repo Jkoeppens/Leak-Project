@@ -279,8 +279,6 @@ modules:
           desc: Initialisiert Environment
       output: []
 
-modules:
-
   - name: pipe/topics_flow/attach_topics_to_hierarchy.py
     purpose: >
       Verknüpft Topics mit Hierarchie-Clustern basierend auf der Infomap-Levelstruktur.
@@ -504,8 +502,6 @@ modules:
         - name: console_report
           type: text
           desc: Knoten- und Kantenzahl, Warnungen, Laufzeitberichte
-
-modules:
 
   - name: pipe/inspect_metatopics.py
     purpose: >
@@ -874,8 +870,6 @@ modules:
           type: csv
           target: outputs.org_dir
           desc: Aggregierte Topic-Flüsse zwischen Clustern
-
-modules:
 
   - name: pipe/topics_flow/topic_flows.py
     purpose: >
