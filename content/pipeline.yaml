@@ -386,7 +386,7 @@ modules:
         - name: cluster_topic_pies_summary.csv
           type: csv
           source: outputs.org_dir
-          desc: Optional: Top-Topic-Zusammenfassung
+          desc: Optional Top-Topic-Zusammenfassung
       use:
         - name: pandas
           type: library
