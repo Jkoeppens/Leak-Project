@@ -1,0 +1,3577 @@
+## pipe/config.py
+
+**Zweck:** Zentrale Konfigurationslogik. Lädt YAML-Dateien, merged lokale Overrides und wandelt Pfade in absolute um.
+
+**Hauptfunktionen:**
+- `repo_root() -> Path` – ermittelt Projektwurzel (Git oder Fallback)
+- `_expand_placeholders(obj, root_str)` – ersetzt `{root}`-Platzhalter
+- `_abspath_paths(paths, rr)` – macht Pfade absolut
+- `_deep_merge(a, b)` – rekursiver Dict-Merge
+- `load_config() -> dict` – lädt, merged und erweitert Konfiguration
+
+**Abhängigkeiten:** `pathlib`, `yaml`, `json`
+
+**Outputs:** Gibt vollständiges, benutzbares Config-Dict mit absoluten Pfaden zurück.
+
+## pipe/ingest/ingest_any.py
+
+**Zweck:**  
+Einstiegspunkt der Pipeline. Liest E-Mail-Daten aus beliebigen Quellen (`.eml`, `.mbox`, Verzeichnis) ein und wandelt sie in tabellarische CSV-Dateien für Ereignisse, Akteure und Kommunikationskanten um.  
+Ziel ist die Normalisierung, Filterung und Strukturierung des Rohmaterials für spätere Analyse- und Visualisierungsstufen (z. B. Netzwerk- oder Topic-Flows).
+
+---
+
+### ⚙️ Hauptfunktionen
+
+| Funktion | Input | Output | Beschreibung |
+|-----------|--------|---------|---------------|
+| `_norm_email(addr)` | `str` | bereinigte E-Mail-Adresse | Extrahiert und normalisiert E-Mail-Adressen. |
+| `_sha256(s)` | `str` | `str` (Hash) | Hash zur eindeutigen Identifikation von Events. |
+| `_parse_recipients(msg, field)` | `email.message`, Feldname (`'to'`/`'cc'`) | `list[str]` | Extrahiert Empfängeradressen aus Mail-Headern. |
+| `_message_ts(msg)` | `email.message` | `datetime` oder `None` | Liefert UTC-Zeitstempel aus dem Header. |
+| `_extract_text(msg, keep, max_chars)` | `email.message`, Flags | `str` | Extrahiert Textkörper (multipart-fähig, robust gegen Kodierungsfehler). |
+| `_list_all_files(root)` | `Path` | `List[Path]` | Listet alle Dateien unterhalb eines Wurzelpfads. |
+| `_iter_messages_from_dir(files)` | `List[Path]` | Iterator über `(msg, path)` | Liest Mails aus Dateien im Verzeichnis. |
+| `_iter_messages(path, prelisted)` | `Path` oder `List[Path]` | Iterator | Erkennt automatisch `.eml`, `.mbox` oder Verzeichnisse. |
+| `ingest_emails(cfg, input_root=None)` | Config-Dict, optionaler Eingabepfad | `dict[str,str]` | Hauptfunktion: verarbeitet alle Mails, schreibt CSVs für `events`, `actors`, `edges`. |
+| `main_cli()` | CLI-Argumente | — | Befehlszeilen-Interface für direkten Aufruf (`python ingest_any.py --input <dir>`). |
+
+---
+
+### 🔁 Datenfluss
+
+1. Eingabe: E-Mail-Dateien aus `cfg["paths"]["raw_dir"]` oder über `--input`.  
+2. Parsing: extrahiert Absender, Empfänger, Datum, Betreff, Thread-Bezüge, Body-Text.  
+3. Ausgabe:
+   - `clean/events.csv` – Metadaten jeder Mail  
+   - `clean/event_actor.csv` – Zuordnung Event ↔ Akteur ↔ Rolle  
+   - `paths.edges` – aggregierte Kommunikationskanten (`from` → `to`, Gewicht, letztes Datum)  
+4. Fortschritts-Logging und rudimentäres Error-Handling.
+
+---
+
+### 🧩 Abhängigkeiten
+
+- **Standardlib:** `pathlib`, `csv`, `datetime`, `email`, `hashlib`, `mailbox`, `os`, `re`, `time`, `argparse`
+- **Externe Libs:** `pandas` (nur importiert, aktuell ungenutzt)
+- **Projektintern:** `pipe.config.load_config`
+
+---
+
+### 📦 Outputstruktur
+
+```text
+{clean_dir}/events.csv
+{clean_dir}/event_actor.csv
+{paths.edges}
+
+## pipe/hierarchy/diagnose_levels.py
+
+**Zweck:**  
+Analysiert die hierarchischen Clustergrößen in den verschiedenen Level-Spalten eines Hierarchie-DataFrames (`level_1`, `level_2`, …).  
+Misst, ob die Größenverteilung einem **Power-Law** folgt, und berechnet Heuristiken wie „Top-k-Abdeckung“ und „Elbow-Punkt“.  
+Dient der **diagnostischen Validierung und Parametrisierung** der hierarchischen Struktur.
+
+---
+
+### ⚙️ Hauptfunktionen
+
+| Funktion | Input | Output | Beschreibung |
+|-----------|--------|---------|---------------|
+| `_coverage_topk(counts, target=0.8)` | `pd.Series` (Clustergrößen), `float` | `int` | Anzahl Top-Cluster, die `target` Prozent der Gesamtgröße abdecken. |
+| `_elbow_k(counts)` | `pd.Series` | `int` | Heuristik für den „Elbow“-Punkt in der kumulativen Verteilungskurve. |
+| `_fit_powerlaw(values)` | `np.ndarray` | `dict` | Passt Power-Law an und vergleicht mit Lognormal-Verteilung. Liefert Parameter (α, xmin, D, R, p). |
+| `analyze_levels(H, outdir, plot_levels=('level_2','level_3'))` | `pd.DataFrame`, Zielverzeichnis, optionale Levelauswahl | `pd.DataFrame` | Führt Analyse für alle `level_*`-Spalten durch, schreibt CSV + optional CCDF-Plots. |
+
+---
+
+### 📊 Berechnete Kennzahlen pro Level
+
+| Metrik | Bedeutung |
+|--------|------------|
+| `xmin` | Minimale Clustergröße für Power-Law-Fit |
+| `alpha` | Exponent des Power-Law |
+| `ks_D` | Kolmogorov–Smirnov-Distanz (Goodness-of-Fit) |
+| `lr_R`, `lr_p` | Log-Likelihood-Vergleich mit Lognormal-Verteilung |
+| `k80`, `k90` | Anzahl Cluster, die 80 % bzw. 90 % der Mitglieder abdecken |
+| `kelbow` | Position des „Elbow“-Punkts |
+| `min_size` | Empfohlene minimale Clustergröße |
+
+---
+
+### 📦 Output
+
+Schreibt folgende Dateien nach `outdir`:
+
+cluster_stats_summary.csv
+ccdf_<level>.png # optional, pro Level mit Plot
+
+
+---
+
+### 🧩 Abhängigkeiten
+
+- **Standardlib:** `pathlib`, `typing`, `collections`
+- **Externe Libs:** `numpy`, `pandas`, `matplotlib`, `powerlaw`
+- **Projektintern:** keine
+
+---
+
+### 🧭 Bedeutung im Gesamtsystem
+
+Dieses Modul validiert, ob die gebildeten Cluster auf jeder Hierarchieebene **statistisch plausibel** sind.  
+Die Ergebnisse (CSV + Plots) können genutzt werden, um:
+- Mindest-Clustergrößen für spätere Verarbeitungsschritte festzulegen,
+- Power-Law-Charakteristik der Hierarchie zu dokumentieren,
+- oder automatische „Elbow“-Heuristiken in der Auswahl der Levelgrenzen zu stützen.
+
+## pipe/hierarchy/io.py
+
+**Zweck:**  
+Zentraler **IO- und Datenvorbereitungsbaustein** für hierarchische Netzwerkdaten.  
+Bietet robuste Funktionen zum Laden von Level- und Kanten-CSV-Dateien, zur Klassifizierung interner/externer Knoten,  
+zur Filterung von Edges nach Gewicht oder Reziprozität sowie zur Erstellung von Basisberichten und Histogrammen.
+
+---
+
+### ⚙️ Hauptfunktionen
+
+| Funktion | Input | Output | Beschreibung |
+|-----------|--------|---------|---------------|
+| `_pick(cols, cands)` | Liste vorhandener Spalten, mögliche Kandidatennamen | `str` oder `None` | Hilfsfunktion: findet den ersten passenden Spaltennamen (case-insensitive). |
+| `_is_internal_series(series, domains)` | `pd.Series`, Domainliste | `pd.Series[bool]` | Markiert Zeilen, deren Werte zu internen Domains gehören. |
+| `load_edges_prepared(cfg)` | Config-Dict | `pd.DataFrame` | Lädt vorbereitete Edgelist (`edges_prepared`), prüft Spaltenstruktur. |
+| `load_levels(levels_csv)` | Pfad zu Levels-CSV | `pd.DataFrame` | Lädt Hierarchieebenen, erkennt Spalten `level_*`, konvertiert zu numerisch und stellt sicher, dass eine `node`-Spalte existiert. |
+| `load_edges(edges_csv)` | Pfad zu Edgelist | `pd.DataFrame` | Robust gegen unterschiedliche Spaltennamen, aggregiert Duplikate und standardisiert auf `src`, `dst`, `weight`. |
+| `mark_outside(E, domains, outside_label="Outside world")` | Edgelist, Domainliste | `pd.DataFrame` | Ersetzt alle Knoten außerhalb gegebener Domains durch den Sammelknoten „Outside world“. |
+| `filter_internal_mode(E, mode, domains, outside_label)` | Edgelist, Filtermodus | `pd.DataFrame` | Wendet Filterstrategie an: `'include'`, `'outside_supernode'` oder `'exclude'`. |
+| `apply_edge_filters(E, min_weight=1, require_reciprocal=False)` | Edgelist | `pd.DataFrame` | Filtert Kanten nach Mindestgewicht und optional Reziprozität. |
+| `ego_subgraph(E, seeds, hops=0)` | Edgelist, Startknoten, Reichweite | `pd.DataFrame` | Erzeugt Ego-Netzwerk mit gegebener Tiefe (`hops`). |
+| `basic_report(E, H=None)` | Edgelist, optional Hierarchie-DF | `dict` | Berechnet Basisstatistiken über Knoten, Kanten, Gewichte und ggf. Clusteranzahl pro Level. |
+| `save_report(report, outdir)` | Report-Dict, Zielordner | — | Speichert JSON- und CSV-Reports (`data_report.json`, `top_degree_nodes.csv`). |
+| `hist_weight(E, out_png)` | Edgelist, Pfad | — | Erstellt logarithmisches Histogramm der Kantengewichte. |
+| `hist_degree(E, out_png)` | Edgelist, Pfad | — | Erstellt logarithmisches Histogramm der Knotengrade. |
+
+---
+
+### 📦 Outputstrukturen
+
+data_report.json
+top_degree_nodes.csv
+weight_histogram.png
+degree_histogram.png
+
+
+Alle Pfade werden im jeweiligen Output-Verzeichnis (`outdir`) angelegt.
+
+---
+
+### 🧩 Abhängigkeiten
+
+- **Standardlib:** `pathlib`, `typing`
+- **Externe Libs:** `pandas`, `numpy`, `matplotlib`
+- **Projektintern:** keine (dieses Modul wird von anderen importiert)
+
+---
+
+### 🧭 Bedeutung im Gesamtsystem
+
+Dieses Modul bildet die **Basis-API für alle Ein- und Ausgaben** in der Hierarchieanalyse.  
+Es sorgt für:
+- konsistente Spaltenbenennung über Dateien hinweg,
+- robuste Handhabung von unvollständigen oder fehlerhaften Daten,
+- saubere Trennung zwischen internen und externen Kommunikationsknoten,
+- sowie erste Analysen zur Netzwerkstruktur (z. B. Knotengrade, Gewichtsdichten).
+
+Fast alle anderen `hierarchy`-Module (`inspect_levels`, `dynamic_levels`, `diagnostics`) greifen auf Funktionen aus `io.py` zurück, um Daten zu laden oder zu validieren.
+
+
+## pipe/hierarchy/leader_select.py
+
+**Zweck:**  
+Ermittelt **Cluster-Leader** auf Basis von Knotendegrees innerhalb eines Kommunikationsnetzwerks.  
+Für jedes sichtbare Cluster (gemäß `selection_dynamic.json`) wird die Person mit dem höchsten internen und globalen Degree als „Leader“ bestimmt.  
+Zusätzlich werden globale Top-Executives („execs“) identifiziert.  
+
+---
+
+### ⚙️ Hauptfunktionen
+
+| Funktion | Input | Output | Beschreibung |
+|-----------|--------|---------|---------------|
+| `_pick_col(cols, *cands)` | Iterable von Spaltennamen | `str` oder `None` | Findet passende Spaltennamen für Quellen und Ziele (case-insensitive). |
+| `_undirected_simple_edges(E, src, dst)` | Edgelist-DF, Spaltennamen | `pd.DataFrame` | Wandelt Kanten in eindeutige, ungerichtete Paare (`u`, `v`) um. |
+| `_visible_clusters(selection)` | Dict aus `selection_dynamic.json` | `dict[str, set[int]]` | Bestimmt, welche Cluster auf jeder Ebene „sichtbar“ bzw. aktiv sind. |
+| `_pick_leader_degree(G, members)` | `nx.Graph`, Liste von Knoten | `tuple[str, int, int]` | Wählt den Knoten mit dem höchsten internen und globalen Degree als Leader. |
+| `build_leaders_by_degree(cfg, use_prepared_edges=True)` | Config-Dict | `dict[str, Any]` | Hauptfunktion: erzeugt Leader je Cluster + globale Exec-Liste, speichert `leaders.json` und `leaders_flat.csv`. |
+
+---
+
+### 📊 Algorithmischer Ablauf
+
+1. Lade Level-Daten (`load_levels(cfg["paths"]["levels"])`).  
+2. Lade Edgelist (`edges_prepared` oder `edges`).  
+3. Erkenne Spalten `src` und `dst`.  
+4. Erzeuge ungerichteten Graphen `nx.Graph()`.  
+5. Lade dynamische Auswahl (`selection_dynamic.json`) → sichtbare Cluster bestimmen.  
+6. Wähle:
+   - pro Cluster den Node mit maximalem internen/globalen Degree (`leader`),  
+   - global `n_execs` Knoten mit höchstem Degree (`execs`).  
+7. Schreibe Ergebnisse:
+outputs/org_dir/leaders.json
+outputs/org_dir/leaders_flat.csv
+
+---
+
+### 📦 Outputstruktur
+
+```json
+{
+"execs": ["A", "B", "C", ...],
+"levels": {
+ "level_2": {
+   "1001": {"leader": "alice@corp.com", "deg_in": 7, "deg_global": 45},
+   ...
+ }
+}
+}
+🧩 Abhängigkeiten
+
+Standardlib: pathlib, json
+
+Externe Libs: numpy, pandas, networkx
+
+Projektintern: pipe.hierarchy.io.load_levels
+
+🧭 Bedeutung im Gesamtsystem
+
+Dieses Modul ist das Entscheidungszentrum der Hierarchieanalyse:
+Es übersetzt Netzwerkstruktur in Führungsebenen.
+Kombiniert statistische Selektion (aus dynamic_levels.py) mit struktureller Position im Netzwerk (via networkx).
+Die erzeugten Leaderdaten sind Grundlage für alle nachfolgenden Visualisierungen und Berichte (leaders.py, orgchart_html.py etc.).
+
+## pipe/hierarchy/leaders.py
+
+**Zweck:**  
+Bestimmt **globale und hierarchische Führungspersonen** im Kommunikationsnetzwerk anhand der **Betweenness-Zentralität**.  
+Für jedes Cluster auf jeder Hierarchieebene wird ein Leader identifiziert; zusätzlich werden globale „Executives“ (Top-Nodes mit höchster Betweenness) berechnet.  
+Dieses Modul ist die präzisere, zentralitätsbasierte Alternative zu `leader_select.py`.
+
+---
+
+### ⚙️ Hauptfunktionen
+
+| Funktion | Input | Output | Beschreibung |
+|-----------|--------|---------|---------------|
+| `_undirected_weighted(E)` | Edgelist-`DataFrame` | `nx.Graph` | Baut einen ungerichteten, gewichteten Netzwerkgraphen aus `src`, `dst`, `weight`. |
+| `_is_internal(name, domains)` | `str`, Domain-Tuple | `bool` | Prüft, ob eine Node-ID zu internen Domains gehört (ausschließt „Outside world“). |
+| `_filter_candidates(nodes, mode, domains, allow_external)` | Iterable von Nodes, Filterparameter | `list[str]` | Filtert Kandidaten abhängig von Modus und Domain-Regeln. |
+| `_leader_for_nodes(E, nodes, cap, seed, mode, domains, allow_external_leaders)` | Edgelist, Node-Liste | `(str | None, float)` | Wählt den Node mit höchster Betweenness-Zentralität im Subgraph (Cluster). |
+| `_members(H, level, cid)` | Hierarchie-DF, Level, Cluster-ID | `list[str]` | Liefert alle Node-IDs eines Clusters. |
+| `compute_leaders(H, E, selection, ...)` | Hierarchie-DF, Edgelist, Auswahl-JSON | `dict[str, Any]` | Hauptfunktion: berechnet globale und lokale Leader nach Betweenness; gibt verschachtelte Struktur zurück. |
+| `flatten_leaders(leaders)` | Leaders-Dict | `pd.DataFrame` | Wandelt verschachtelten Leaders-Dict in flache Tabelle um (`level`, `cluster_id`, `leader`, `score`). |
+| `save_leaders(leaders, cfg)` | Leaders-Dict, Config | `(str, str)` | Speichert Leaderdaten als `leaders.json` und `leaders_flat.csv`. |
+| `find_external_leaders(leaders, internal_domains)` | Leaders-Dict, Domains | `list[tuple]` | Findet und listet alle externen (nicht-domaininternen) Leader. |
+
+---
+
+### 📊 Algorithmischer Ablauf
+
+1. **Graph-Erstellung:**  
+   Aus `E` wird ein gewichteter ungerichteter Graph erzeugt (`_undirected_weighted`).
+2. **Globale Execs:**  
+   - Berechnung der Betweenness-Zentralität für alle Nodes (Sampling über `bt_cap`).  
+   - Auswahl der oberen `pct_exec` Prozent als globale Führungspersonen.
+3. **Cluster-Leader:**  
+   - Iteration über alle Cluster (`selection["levels"]` und `selection["children"]`).  
+   - Für jedes Cluster: Betweenness-Zentralität im induzierten Subgraph → Leader bestimmen.
+4. **Ergebnis speichern:**
+outputs/org_dir/leaders.json
+outputs/org_dir/leaders_flat.csv
+
+---
+
+### 📦 Outputstruktur
+
+```json
+{
+"execs": ["ceo@corp.com", "vp@corp.com", ...],
+"levels": {
+ "level_1": {
+   "100": {"leader": "alice@corp.com", "score": 0.1234},
+   ...
+ },
+ "level_2": { ... }
+}
+}
+🧩 Abhängigkeiten
+
+Standardlib: pathlib, json
+
+Externe Libs: numpy, pandas, networkx
+
+Projektintern: keine direkten Imports (arbeitet auf generischen Inputs aus dynamic_levels)
+
+🧭 Bedeutung im Gesamtsystem
+
+Dieses Modul berechnet die finale Führungsstruktur auf Grundlage des Kommunikationsnetzwerks:
+
+globale Execs (zentralste Akteure im gesamten Netzwerk),
+
+Cluster-Leader auf allen Hierarchieebenen.
+Damit bildet es die Grundlage für:
+
+Organigramme und Visualisierungen (orgchart_html.py),
+
+qualitative Analysen zur internen und externen Machtverteilung,
+
+Vergleiche zwischen Degree- und Centrality-basierten Leadership-Modellen (leader_select.py vs. leaders.py).
+
+## pipe/hierarchy/orgchart_html_topics.py
+
+**Zweck:**  
+Rendert ein **interaktives Organigramm mit Themen-Overlays** auf Basis der Hierarchie-, Leader- und Topic-Daten.  
+Erzeugt ein HTML mit `pyvis`, das Cluster, Hierarchieebenen, Führungspersonen und optionale Topic-Pies visuell darstellt.
+
+---
+
+### ⚙️ Hauptfunktion
+
+```python
+build_org_html(
+    selection: dict,
+    leaders: dict | None,
+    H: pd.DataFrame,
+    persons: pd.DataFrame | None = None,
+    out_html: str = "organigram_interaktiv.html",
+    max_depth: int = 5,
+    z_by_level: dict | None = None,
+    topics_by_level: dict | None = None,
+    physics: bool = False,
+    label_template: str = "{level}:{cid} • n={n} • {topics}",
+    label_size: int = 16,
+    extra_edges: list | None = None,
+    E: pd.DataFrame | None = None,
+    pie_in_tooltip: bool = True,
+    debug: bool = True
+) -> str
+Erzeugt ein interaktives HTML (out_html) mit Hierarchie-Layout.
+Gibt den Pfad zur geschriebenen Datei zurück.
+| Komponente                                | Beschreibung                                                                 |
+| ----------------------------------------- | ---------------------------------------------------------------------------- |
+| `_esc(s)`                                 | HTML-safe String-Escaping für Tooltips.                                      |
+| `_name_map(persons)`                      | Erzeugt Mapping von `person_id`/`email` → `name`.                            |
+| `_sizes_per_level(H, levels)`             | Zählt Clustergrößen pro Hierarchieebene.                                     |
+| `_colors_for(levels)`                     | Vergibt konsistente Farben pro Ebene (Cycle aus 8 Grundfarben).              |
+| `_prune_selection(selection, max_levels)` | Reduziert Selektion auf definierte Tiefen und entfernt unsichtbare Children. |
+| `_prune_selection_local(sel, max_levels)` | Inline-Variante zur Begrenzung der Visualisierungstiefe.                     |
+
+
+📊 Algorithmischer Ablauf
+
+Eingabedaten aufbereiten:
+
+Normalisierung der node-Spalte.
+
+Selektion auf gewünschte Tiefe (max_depth).
+
+Mapping-Tabellen erstellen (name_map, sizes, z_by_level, topics_by_level).
+
+Netzwerk-Setup (pyvis.Network):
+
+Hierarchisches Layout (UD), optionale Physik, einheitliche Knoten- und Schriftstile.
+
+EXEC-Knoten als oberste Ebene.
+
+Knoten-Generierung:
+
+Ebene 1: Direkt unter Executives.
+
+Tiefere Ebenen: Eltern-Kind-Verbindungen gemäß selection['children'].
+
+Label: anpassbar via label_template, standardmäßig inklusive Leader, Größe, Z-Wert, Degree und Topics.
+
+Kanten:
+
+Hierarchische Kanten zwischen Ebenen.
+
+Optionale Kommunikations-/Topic-Kanten (extra_edges) an der tiefsten Ebene.
+
+Ausgabe:
+
+HTML-Datei wird unter out_html gespeichert.
+
+📦 Output
+Datei	Inhalt
+organigram_interaktiv.html	Interaktives hierarchisches Netzwerkdiagramm
+(optionale Zusatzkanten)	Visualisierung von Themen- oder Kommunikationsflüssen
+
+🧩 Abhängigkeiten
+
+Standardlib: pathlib, json
+
+Externe Libs: numpy, pandas, pyvis
+
+Projektintern: keine
+
+Bedeutung im Gesamtsystem
+
+Dieses Modul ist die Basis-Visualisierung der Organisationsstruktur.
+Es visualisiert:
+
+Hierarchien (aus dynamic_levels.py),
+
+Führungsebenen (aus leaders.py oder leader_select.py),
+
+und optionale Themenverbindungen (topics_flow-Module).
+
+Im Unterschied zu orgchart_html_topics.py liegt der Fokus hier auf der strukturellen Klarheit (hierarchische Knoten, Z-Werte, Degree-Metriken)
+statt auf thematischer Dichte.
+
+Es dient sowohl als Analysewerkzeug (zur Überprüfung der Selektion und Leader-Logik)
+als auch als Darstellungsmodul für Stakeholder und Ergebnisberichte.
+
+## pipe/hierarchy/prep.py
+
+**Zweck:**  
+Bereitet die Kanten (Edges) für alle weiteren Analysen vor.  
+Wendet Domain-, Gewichtungs- und Subgraph-Filter an, speichert das Ergebnis als `edges_prepared.csv`,  
+und erstellt zugleich einen Basisreport mit Histogrammen.
+
+---
+
+### ⚙️ Hauptfunktion
+
+```python
+prepare_edges_and_report(cfg: dict)
+    -> tuple[pd.DataFrame, str, dict]
+| Rückgabe            | Beschreibung                                    |
+| ------------------- | ----------------------------------------------- |
+| `E_prepared`        | gefilterte Edgelist als `DataFrame`             |
+| `prepared_csv_path` | Pfad zur gespeicherten CSV                      |
+| `report_dict`       | Basisstatistik über Knoten, Kanten, Degree etc. |
+
+📊 Verarbeitungsschritte
+
+Rohdaten laden
+
+load_edges(cfg["paths"]["edges"])
+
+Normalisierung der Spalten (src, dst, weight).
+
+Intern/Extern-Filterung
+
+via filter_internal_mode()
+
+Modi:
+
+"include": alles behalten
+
+"outside_supernode": externe Adressen zu „Outside world“ bündeln
+
+"exclude": nur interne behalten
+
+Kantenfilter
+
+via apply_edge_filters()
+
+Optionen: min_weight, require_reciprocal (beidseitige Kommunikation).
+
+Subgraph (optional)
+
+via ego_subgraph()
+
+extrahiert Netz rund um Seed-Knoten (seed_emails) in n Hops.
+
+Speichern
+
+Ergebnis in cfg["paths"]["edges_prepared"].
+
+Reporting und Visualisierung
+
+basic_report() → JSON-Statistik + Top-Degree-Liste
+
+hist_weight() & hist_degree() → PNG-Histogramme
+
+Ablage im cfg["outputs"]["cutoffs_dir"].
+
+| Datei                       | Inhalt                                                   |
+| --------------------------- | -------------------------------------------------------- |
+| `edges_prepared.csv`        | Gefilterte Kanten (bereit für Clustering)                |
+| `data_report.json`          | Netzwerkanalyse (Knoten-, Kantenzahlen, Degree-Metriken) |
+| `top_degree_nodes.csv`      | Top-10-Knoten nach Degree                                |
+| `hist_weights_prepared.png` | Gewichtshistogramm                                       |
+| `hist_degree_prepared.png`  | Degree-Verteilung                                        |
+
+🧩 Abhängigkeiten
+
+Intern:
+io.py (alle Lade- und Filterfunktionen)
+
+Externe Libs:
+pandas, pathlib, matplotlib (über hist_*)
+
+🧭 Bedeutung im Gesamtsystem
+
+prep.py ist der technische Startpunkt der gesamten Pipeline.
+Es sorgt für konsistente, bereinigte Kanten, bevor weitere Module ansetzen:
+
+inspect_levels.py → Clusterstatistik
+
+leader_select.py / leaders.py → Führungslogik
+
+orgchart_html.py → Visualisierung
+
+Das Modul bildet also die Grundlage für alle nachgelagerten Hierarchie- und Themenanalysen.
+
+## pipe/hierarchy/signif_debug.py
+
+**Zweck:**  
+Diagnose- und Debug-Werkzeug für die Signifikanzanalyse von Clustern.  
+Liest die Ausgaben aus der „Significance“-Phase (`cluster_significance_*.csv`),  
+berechnet robuste Z-Kennzahlen, identifiziert Ausreißer und schreibt strukturierte Debug-Reports.
+
+---
+
+### ⚙️ Hauptfunktion
+
+```python
+run_signif_debug(cfg: dict, topk: int = 10)
+    -> Tuple[pd.DataFrame, pd.DataFrame, str]
+| Rückgabe      | Beschreibung                                |
+| ------------- | ------------------------------------------- |
+| `summary_df`  | Überblicksstatistik pro Level               |
+| `outliers_df` | Top-/Low-Z-Cluster je Ebene                 |
+| `notes_str`   | Textuelle Hinweise zu numerischen Problemen |
+
+
+📊 Ablauf
+
+Dateisuche
+_find_signif_files(signif_dir) erkennt automatisch cluster_significance_level_*.csv
+oder cluster_significance_*.csv und mappt sie auf Levelnamen.
+
+Robuste Z-Scores
+_robust_z() ergänzt:
+
+z_mad → Z auf Basis Median ± MAD
+
+z_iqr → Z auf Basis Interquartilsabstand
+zur Identifikation numerischer Ausreißer.
+
+Moment-Statistik
+_moment_summary() berechnet für jede Ebene:
+
+Mittelwert, Standardabweichung, Quantile
+
+Streuungsdiagnose (sigma_near_zero)
+
+Knotenverteilung (n_nodes_min, p50, max)
+
+Ausreißeridentifikation
+_extremes_by_abs_z() zieht pro Level die Top- und Bottom-k-Cluster nach |z|.
+
+Warn- und Hinweislogik
+_notes_for_level() erkennt:
+
+σ ≈ 0 → numerisch instabile Z-Werte
+
+var_m_in ≈ 0 → Division durch Null → unendliche Z
+
+density_observed = 0 oder ≈ 1 → extreme Netzstrukturen
+
+Output-Erstellung
+
+z_debug_summary.csv → Gesamtstatistik aller Levels
+
+z_debug_outliers.csv → Extrem-Cluster je Level
+
+Konsolenausgabe bzw. Rückgabe: kombinierte Notizen als Text.
+
+| Datei                  | Inhalt                                 |
+| ---------------------- | -------------------------------------- |
+| `z_debug_summary.csv`  | Übersicht Z-Statistik pro Level        |
+| `z_debug_outliers.csv` | Top/Bottom-Z-Cluster                   |
+| *(stdout / Rückgabe)*  | Text-Hinweise zu pathologischen Fällen |
+
+
+🧩 Abhängigkeiten
+
+Standardlib: pathlib, typing, numpy
+
+Externe Libs: pandas
+
+Projektintern: keine
+
+🧭 Bedeutung im Gesamtsystem
+
+signif_debug.py ergänzt die Qualitätskontrolle der Clusteranalyse:
+Es prüft, ob die Berechnungen aus der Signifikanzphase (cluster_significance_*.csv) stabil sind,
+liefert robuste Alternativen (z_mad, z_iqr) und dokumentiert auffällige Cluster.
+
+Das Modul wird typischerweise nach der Signifikanzberechnung ausgeführt,
+um numerische Probleme frühzeitig zu erkennen, bevor die Ergebnisse
+in Visualisierungen (z. B. orgchart_html) oder Topic-Analysen weiterfließen.
+
+
+# pipe/signif.py
+from __future__ import annotations
+from pathlib import Path
+from typing import Tuple, Dict, Any
+import numpy as np
+import pandas as pd
+
+from .io import load_levels  # nutzt dein robustes Level-Loading
+
+# ---------- Helfer: Kanten normalisieren ----------
+def _normalize_edges(E: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ungerichtete, ungewichtete Kanten (u<v) aus (src,dst[,weight]).
+    Entfernt Self-Loops & Duplikate.
+    """
+    colmap = {c.lower(): c for c in E.columns}
+    src = next((colmap[k] for k in ("src","source","from","from_email","u","src_person_id") if k in colmap), None)
+    dst = next((colmap[k] for k in ("dst","target","to","to_email","v","dst_person_id") if k in colmap), None)
+    if src is None or dst is None:
+        raise ValueError(f"src/dst Spalten nicht gefunden: {list(E.columns)}")
+
+    if "weight" in colmap:
+        w = colmap["weight"]
+        E = E[[src, dst, w]].copy()
+        E[w] = pd.to_numeric(E[w], errors="coerce").fillna(0.0)
+        E = E[E[w] > 0]
+    else:
+        E = E[[src, dst]].copy()
+
+    E = E.dropna(subset=[src, dst])
+    E[src] = E[src].astype(str); E[dst] = E[dst].astype(str)
+    E = E[E[src] != E[dst]]
+
+    uv = pd.DataFrame({
+        "u": np.where(E[src] < E[dst], E[src], E[dst]),
+        "v": np.where(E[src] < E[dst], E[dst], E[src]),
+    })
+    return uv.drop_duplicates()
+
+def _degree_and_index(uv: pd.DataFrame) -> Tuple[pd.Index, pd.Series, int]:
+    nodes = pd.unique(uv[["u","v"]].values.ravel("K"))
+    nodes = pd.Index(nodes, name="node")
+    deg = pd.Series(0, index=nodes, dtype=np.int64)
+    vc_u = uv["u"].value_counts()
+    vc_v = uv["v"].value_counts()
+    deg.loc[vc_u.index] += vc_u.astype(np.int64)
+    deg.loc[vc_v.index] += vc_v.astype(np.int64)
+    m_total = int(len(uv))
+    return nodes, deg, m_total
+
+def _cluster_members(H: pd.DataFrame, level_name: str) -> dict[int, list[str]]:
+    if level_name not in H.columns:
+        raise ValueError(f"{level_name} nicht in H: {list(H.columns)}")
+    df = H[["node", level_name]].dropna().copy()
+    df["node"] = df["node"].astype(str)
+    df[level_name] = pd.to_numeric(df[level_name], errors="coerce").astype("Int64")
+    groups = df.groupby(level_name)["node"].apply(list)
+    return {int(cid): lst for cid, lst in groups.items()}
+
+def _m_in_observed(uv: pd.DataFrame, members: set[str]) -> int:
+    inS_u = uv["u"].isin(members)
+    inS_v = uv["v"].isin(members)
+    return int((inS_u & inS_v).sum())
+
+def _expect_var_chung_lu_regularized(
+    deg: pd.Series, m_total: int, members: list[str], eps: float = 1e-9,
+    sample_pairs_cap: int = 500_000, rng_seed: int = 42
+) -> Tuple[float, float, float]:
+    """
+    Erwartung/Varianz im grad-korrigierten Konfigurationsmodell:
+      p_ij = clip(k_i*k_j/(2m), eps, 1-eps)
+      E[m_in] = sum_{i<j} p_ij
+      Var ≈ sum_{i<j} p_ij (1 - p_ij)
+    Für sehr große Cluster wird auf Paar-Sampling zurückgegriffen.
+    """
+    if m_total <= 0 or len(members) < 2:
+        return 0.0, 1e-9, eps
+
+    ks = deg.reindex(members).fillna(0).to_numpy(dtype=np.float64)
+    n = ks.size
+    pair_count = n * (n - 1) // 2
+
+    if pair_count > 2_000_000:
+        rng = np.random.default_rng(rng_seed)
+        s = min(sample_pairs_cap, pair_count)
+        # ziehe s zufällige Paar-Indizes (i<j) näherungsweise
+        i = rng.integers(0, n, size=s)
+        j = rng.integers(0, n, size=s)
+        mask = i != j
+        i, j = i[mask], j[mask]
+        p = (ks[i] * ks[j]) / (2.0 * m_total)
+        p = np.clip(p, eps, 1.0 - eps)
+        Em = float(p.mean() * pair_count)
+        Var = float((p * (1.0 - p)).mean() * pair_count)
+        return Em, max(Var, 1e-9), eps
+
+    # exakte Summe
+    i_idx, j_idx = np.triu_indices(n, k=1)
+    p = (ks[i_idx] * ks[j_idx]) / (2.0 * m_total)
+    p = np.clip(p, eps, 1.0 - eps)
+    Em = float(p.sum())
+    Var = float((p * (1.0 - p)).sum())
+    return Em, max(Var, 1e-9), eps
+
+def _minsize_for(level_name: str, cfg: dict, stats_csv: Path | None) -> int:
+    if stats_csv is not None and stats_csv.exists():
+        ST = pd.read_csv(stats_csv).set_index("level")
+        if level_name in ST.index and "min_size" in ST.columns:
+            return int(ST.loc[level_name, "min_size"])
+    fb = cfg.get("thresholds", {}).get("min_size_fallback", {"L1":5,"L2":5,"L3":5})
+    i = int(level_name.split("_")[1])
+    key = f"L{i}" if f"L{i}" in fb else "L3"
+    return int(fb.get(key, 5))
+
+# ---------- Hauptfunktion ----------
+def run_significance(cfg: dict, use_prepared_edges: bool = True, eps: float = 1e-9) -> pd.DataFrame:
+    """
+    Rechnet robuste Z-Scores pro Cluster/Level und schreibt CSV nach outputs.signif_dir.
+    Nutzt standardmäßig 'paths.edges_prepared' (empfohlen).
+    Returns: Top-10-Summary über alle Level (DataFrame).
+    """
+    # Daten laden
+    H = load_levels(cfg["paths"]["levels"])
+    E_path = cfg["paths"]["edges_prepared"] if use_prepared_edges else cfg["paths"]["edges"]
+    E = pd.read_csv(E_path)
+    uv = _normalize_edges(E)
+    nodes, deg, m_total = _degree_and_index(uv)
+
+    level_cols = sorted([c for c in H.columns if str(c).startswith("level_")],
+                        key=lambda x: int(str(x).split("_")[1]))
+    out_dir = Path(cfg["outputs"]["signif_dir"]); out_dir.mkdir(parents=True, exist_ok=True)
+    stats_csv = Path(cfg["outputs"]["cutoffs_dir"]) / "cluster_stats_summary.csv"
+
+    summary_rows = []
+    for lv in level_cols:
+        ms = _minsize_for(lv, cfg, stats_csv)
+        members_map = _cluster_members(H, lv)
+
+        rows = []
+        for cid, mem in members_map.items():
+            n = len(mem)
+            if n < ms:
+                continue
+            S = set(mem)
+            m_in = _m_in_observed(uv, S)
+            Em, Var, eps_used = _expect_var_chung_lu_regularized(deg, m_total, mem, eps=eps)
+
+            z = (m_in - Em) / (Var**0.5 if Var > 0 else 1e-9)
+
+            rows.append(dict(
+                cluster_id=int(cid),
+                n_nodes=int(n),
+                pairs_possible=int(n*(n-1)//2),
+                m_in_observed=int(m_in),
+                exp_m_in=float(Em),
+                var_m_in=float(Var),
+                density_observed=float(m_in / max(1, n*(n-1)//2)),
+                z_score=float(z),
+                eps_used=float(eps_used),
+                var_floor_used=1e-9 if Var<=1e-9 else 0.0,
+            ))
+
+        df = pd.DataFrame(rows).sort_values(["z_score","n_nodes"], ascending=[False, False])
+        (out_dir / f"cluster_significance_{lv}.csv").write_text(df.to_csv(index=False))
+
+        # Top-10 pro Level für schnelle Sichtprüfung
+        if not df.empty:
+            summary_rows.append(
+                df.head(10)[["cluster_id","n_nodes","z_score","density_observed"]].assign(level=lv)
+            )
+
+    if summary_rows:
+        SDF = pd.concat(summary_rows, ignore_index=True)
+        (out_dir / "top10_per_level.csv").write_text(SDF.to_csv(index=False))
+        return SDF
+    else:
+        # leere Summary zurückgeben
+        return pd.DataFrame(columns=["cluster_id","n_nodes","z_score","density_observed","level"])
+
+        | Rückgabe    | Beschreibung                                         |
+| ----------- | ---------------------------------------------------- |
+| `DataFrame` | Top-10-Signifikanzwerte pro Level (Schnellüberblick) |
+
+
+📊 Ablauf im Detail
+
+Laden der Eingabedaten
+
+levels.csv → Hierarchie mit level_1, level_2, ...
+
+edges_prepared.csv → bereinigte, ungewichtete Kanten.
+
+Erzeugt ungerichtete (u,v) Edgelist ohne Duplikate.
+
+Netzwerkmetriken vorbereiten
+
+_degree_and_index() berechnet Knotengrade (deg) und Gesamtanzahl m_total.
+
+Clusterweise Analyse pro Level
+
+_cluster_members() liefert Knotenlisten je Cluster.
+
+_m_in_observed() zählt interne Kanten im Subgraph.
+
+_expect_var_chung_lu_regularized() schätzt:
+
+E[m_in] = erwartete interne Kantenanzahl
+
+Var[m_in] = Varianz im Chung–Lu-Modell
+
+numerische Regularisierung mit eps und Varianz-Floor 1e-9.
+
+optional: Paar-Sampling bei sehr großen Clustern.
+
+Z-Score-Berechnung
+
+z=min,obs−E[min]Var(min)
+z=
+Var(m
+in
+	​
+
+)
+
+🧩 Abhängigkeiten
+
+Standardlib: pathlib, typing, numpy, pandas
+
+Projektintern:
+
+io.load_levels
+
+ggf. cluster_stats_summary.csv aus inspect_levels.py
+
+| level   | cluster_id | n_nodes | z_score | density_observed |
+| ------- | ---------- | ------- | ------- | ---------------- |
+| level_1 | 4          | 130     | 6.27    | 0.045            |
+| level_2 | 22         | 42      | 4.18    | 0.078            |
+
+
+🧭 Bedeutung im Gesamtsystem
+
+signif.py bildet das statistische Fundament der Pipeline:
+Es quantifiziert, welche Cluster signifikant dichter vernetzt sind als erwartet.
+Diese Signifikanzwerte fließen in:
+
+signif_debug.py (robuste Analyse und Anomalieerkennung),
+
+Orgchart-Visualisierungen (z-basierte Farb- oder Z-Layer),
+
+und Themenebenen zur Bewertung der strukturellen Stärke.
+
+Damit ist signif.py der analytische Kern der Clusterbewertung.
+
+## pipe/analyze_topics.py
+
+**Zweck:**  
+Analysiert die Ergebnisse der BERTopic-Auswertung (aus `pipe.topics_flow`) und erzeugt eine textuelle Übersicht über Topics, häufige Wörter und Beispieldokumente.  
+Eingabedateien: `topic_info.csv`, `topic_words.csv`, `events_with_topics.csv` im Verzeichnis `env["outputs"]["topics_dir"]`.
+
+---
+
+### Funktionen
+
+#### `analyze_topics(env: dict, top_n: int = 10, examples_per_topic: int = 3) -> None`
+Analysiert die BERTopic-Ergebnisse im definierten `topics_dir`.
+
+**Parameter:**
+- `env`: `dict` – Environment-Dictionary mit mindestens `env["outputs"]["topics_dir"]` (Pfad zu den Topic-Ausgabedateien).
+- `top_n`: `int` – Anzahl der Top-Topics, die nach Dokumentanzahl ausgegeben werden (Standard: 10).
+- `examples_per_topic`: `int` – Anzahl der Beispieltexte pro Topic (Standard: 3).
+
+**Ablauf:**
+1. Liest die CSV-Dateien:
+   - `topic_info.csv`
+   - `topic_words.csv`
+   - `events_with_topics.csv`
+2. Ermittelt dynamisch die relevanten Spaltennamen:
+   - **Topic-Spalte (topic_col)** – Kandidaten:  
+     `["Topic", "topic", "topic_id", "thread_topic_id", "topic_id_root", "topic_root"]`
+   - **Text-Spalte (text_col)** – Kandidaten:  
+     `["text", "text_full", "text_clean", "body", "content"]`
+   - Wenn keine der Kandidaten gefunden wird, wird ein `ValueError` ausgelöst, der die vorhandenen Spalten ausgibt.
+3. Berechnet und gibt Statistiken aus:
+   - Anzahl Topics (ohne Noise)
+   - Anzahl Noise-Zeilen (`Topic == -1`)
+   - Gesamtanzahl Zeilen in `topic_info`
+4. Gibt die Top `n` Topics nach Dokumentanzahl aus (`nlargest` auf `Count`).
+5. Zeigt Verteilungsstatistik (`mean`, `median`, `max`, `min`) über `Count`.
+6. Gibt pro Top-Topic die 10 häufigsten Wörter (`Word`) aus `topic_words.csv` aus.
+7. Gibt für die ersten 3 Top-Topics bis zu `examples_per_topic` Beispieltexte (aus `events_with_topics.csv`) aus.
+8. Führt einen Cross-Check durch: zählt Topics in `events_with_topics.csv` mit `value_counts()` und gibt die Ergebnisse aus.
+
+**Rückgabe:**  
+Keine Rückgabe. Alle Ergebnisse werden auf der Standardausgabe (`print`) ausgegeben.
+
+---
+
+### Hauptprogramm
+
+```python
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    analyze_topics(env)
+Wird das Skript direkt ausgeführt:
+
+Importiert setup_environment aus pipe.topics_flow.setup_env
+
+Initialisiert env
+
+Ruft analyze_topics(env) auf
+
+Eingaben / Ausgaben
+
+Eingaben:
+
+env["outputs"]["topics_dir"] – Pfad zu den Topic-Ergebnissen
+
+CSV-Dateien:
+
+topic_info.csv
+
+topic_words.csv
+
+events_with_topics.csv
+
+Ausgaben:
+
+Keine Dateien oder Rückgabewerte
+
+Nur textuelle Ausgabe an die Konsole
+
+Abhängigkeiten
+
+pathlib.Path
+
+pandas as pd
+
+Lokaler Import (bei direkter Ausführung):
+from pipe.topics_flow.setup_env import setup_environment
+
+
+## pipe/topics_flow/attach_topics_to_hierarchy.py
+
+**Zweck:**  
+Verknüpft Topics mit Hierarchie-Clustern basierend auf der Infomap-Levelstruktur.  
+Unterstützt zeitliche Aggregation (periodisch oder „rolling“).  
+
+**Input:**  
+- `cluster_topic_pies_summary.csv` oder `cluster_topic_pies_summary_YYYY-MM.csv` (aus `org_dir`)  
+- `infomap_levels.csv` (aus `data_derived` über `env["paths"]["levels_csv"]`)  
+
+**Output:**  
+- `topic_distribution_by_level.csv` oder `topic_distribution_by_level_YYYY-MM.csv` (im `org_dir`)  
+
+---
+
+### Funktion
+
+#### `attach_topics_to_hierarchy(env: dict) -> None`
+Führt die vollständige Zuordnung und Aggregation von Topic-Informationen zu Hierarchieebenen durch.
+
+**Parameter:**
+- `env`: `dict` – Environment-Dictionary mit folgenden Schlüsseln:
+  - `env["outputs"]["org_dir"]` – Verzeichnis der Organisationsdaten.
+  - `env["outputs"]["topics_dir"]` – Verzeichnis der Topic-Ausgaben (wird importiert, aber hier nicht genutzt).
+  - `env["paths"]["levels_csv"]` – Pfad zur Datei `infomap_levels.csv`.
+  - `env["runtime"]["time_mode"]` – (optional) Zeitmodus: `"off"` oder `"periodic"` / `"rolling"`.
+
+**Ablauf:**
+1. **Initialisierung & Pfadprüfung:**
+   - Prüft Existenz von `levels_csv_path`.
+   - Liest `time_mode` aus `env["runtime"]` (Standard: `"off"`).
+2. **Hilfsfunktion `find_pies_files()`:**
+   - Falls `time_mode == "off"`: lädt eine Datei `cluster_topic_pies_summary.csv`.
+   - Andernfalls: lädt alle periodischen Dateien `cluster_topic_pies_summary_*.csv`.
+3. **Lädt Hierarchieebenen:**
+   - `levels = pd.read_csv(levels_csv_path)`
+   - Bestimmt alle Spalten, die mit `"level_"` beginnen.
+   - Erstellt aus diesen Spalten eine kombinierte Kennung `module_path` (`"level_1:level_2:..."`).
+4. **Hilfsfunktion `normalize_cluster(val)`:**
+   - Gibt `None` zurück, wenn `NaN`.
+   - Andernfalls bereinigt String (`strip()`).
+5. **Iteriert über alle `pie_files`:**
+   - Lädt jede Datei (`pd.read_csv(file)`).
+   - Normalisiert `cluster_id`.
+   - Merged mit Hierarchie (`left_on="cluster_id"`, `right_on="module_path"`).
+   - Prüft auf fehlende Zuordnungen (`missing = merged["level_1"].isna().sum()`).
+6. **Aggregation pro Hierarchieebene:**
+   - Für jede `level_*`-Spalte:
+     - Gruppierung nach `[col, "thread_topic_id"]`
+     - Aggregation:  
+       - `weight`: Summe  
+       - `n_events`: Summe  
+       - `share`: Mittelwert  
+     - Fügt Spalte `"level"` mit aktuellem Levelnamen hinzu.
+     - Bennent Level-Spalte zu `"cluster_id"` um.
+   - Verkettet alle Ebenen (`pd.concat(dist_frames)`).
+7. **Zeitauswertung:**
+   - Wenn `time_mode != "off"` und Dateiname einen Unterstrich enthält, extrahiert `period` aus Dateistamm (`file.stem.split("_")[-1]`).
+   - Sonst `period = "ALL"`.
+8. **Export:**
+   - Erstellt Dateiname:
+     - `topic_distribution_by_level.csv` (wenn `time_mode == "off"`)
+     - `topic_distribution_by_level_{period}.csv` (wenn zeitlich)
+   - Schreibt `topic_dist` als CSV in `org_dir`.
+9. Gibt Statusmeldungen auf der Konsole aus.
+
+**Rückgabe:**  
+Keine (alle Ergebnisse über `print()` und CSV-Dateien ausgegeben).
+
+---
+
+### Hauptprogramm
+
+```python
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    attach_topics_to_hierarchy(env)
+Bei direkter Ausführung:
+
+Importiert setup_environment aus pipe.topics_flow.setup_env
+
+Erstellt env über setup_environment()
+
+Führt attach_topics_to_hierarchy(env) aus
+
+Eingaben / Ausgaben
+
+Eingaben:
+
+env["outputs"]["org_dir"]
+
+env["outputs"]["topics_dir"]
+
+env["paths"]["levels_csv"]
+
+Dateien:
+
+cluster_topic_pies_summary.csv oder cluster_topic_pies_summary_*.csv
+
+infomap_levels.csv
+
+Ausgaben:
+
+topic_distribution_by_level.csv oder topic_distribution_by_level_YYYY-MM.csv (im org_dir)
+
+Konsolenausgabe mit Fortschritt, Warnungen und Statusmeldungen
+
+Abhängigkeiten
+
+pandas as pd
+
+pathlib.Path
+
+Lokaler Import (bei direkter Ausführung):
+from pipe.topics_flow.setup_env import setup_environment
+
+## pipe/clean_threads.py
+
+**Zweck:**  
+Bereinigt Event-Texte (E-Mails oder ähnliche Kommunikation), erkennt Threads und filtert Mails nach Länge.  
+Erzeugt zwei Ausgabedateien:
+- `events_clean.csv` – alle Events inkl. Flags  
+- `events_roots_for_topics.csv` – nur Thread-Roots mit Texten bis zur maximalen Zeichenlänge  
+
+---
+
+### Globale Parameter
+
+| Name | Typ | Beschreibung |
+|------|-----|---------------|
+| `THREAD_GAP_DAYS` | `int = 14` | Maximale Zeitspanne zwischen zwei Nachrichten, um sie demselben Thread zuzuordnen |
+| `MAX_CHARS` | `int = 4000` | Maximale Zeichenlänge für Texte, die in Topics aufgenommen werden |
+| `CUT_MARKERS` | `list[str]` | Textmarker zum Abschneiden weitergeleiteter Nachrichten |
+| `HEADER_PREFIXES` | `tuple[str]` | Header-Zeilen, die als Block entfernt werden |
+| `RE_MULTI_WS`, `RE_URL`, `RE_IMAGE`, `SUBJ_RE_PREFIX`, `BRACKET_TAGS` | `re.Pattern` | Regex-Muster für Textbereinigung |
+
+---
+
+### Cleaning-Funktionen
+
+#### `truncate_at_markers(text: str) -> str`
+Schneidet den Text an der ersten Position eines der Marker aus `CUT_MARKERS` ab.  
+Gibt unveränderten Text zurück, wenn kein Marker gefunden wird.
+
+#### `strip_quote_lines(text: str) -> str`
+Entfernt alle Zeilen, die mit `>` beginnen (Zitatblöcke).
+
+#### `strip_header_blocks(text: str) -> str`
+Entfernt E-Mail-Header-Blöcke, die mit Einträgen aus `HEADER_PREFIXES` beginnen.  
+Beendet das Entfernen nach einer Leerzeile.
+
+#### `clean_simple(s: str) -> str`
+Kombinierte Bereinigung:
+1. Kürzt an Weiterleitungsmarkern (`truncate_at_markers`)
+2. Entfernt Zitatzeilen (`strip_quote_lines`)
+3. Entfernt Header-Blöcke (`strip_header_blocks`)
+4. Entfernt Bilder (`RE_IMAGE`) und URLs (`RE_URL`)
+5. Reduziert Mehrfach-Leerzeichen (`RE_MULTI_WS`)
+
+#### `norm_subject(s: Any) -> str`
+Normalisiert Betreffzeilen:
+- Entfernt Präfixe wie „Re:“, „Fwd:“, „Aw:“ etc.
+- Entfernt eckige Klammern und Tags
+- Kleinbuchstaben und Trimmen
+- Gibt `"(no-subject)"` zurück, falls leer.
+
+#### `pick_root(g: pd.DataFrame) -> int`
+Wählt den „Root Event“ eines Threads:
+- Sortiert nach `date_parsed`, danach `event_id`
+- Gibt die `event_id` der ersten Zeile zurück
+
+---
+
+### Hauptfunktion
+
+#### `clean_and_thread_events(env: Dict[str, Any]) -> pd.DataFrame`
+Bereinigt Texte, erkennt Threads und erzeugt die Ausgabedateien.
+
+**Parameter:**
+- `env`: `dict` mit Pfadangaben:
+  - `env["paths"]["clean_dir"]` – Basisverzeichnis mit Eingabe- und Ausgabedateien
+
+**Verwendete Dateien:**
+- **Input:**  
+  `events_patched_with_participants.csv` (im `clean_dir`)
+- **Output:**  
+  - `events_clean.csv`  
+  - `events_roots_for_topics.csv`
+
+**Ablauf:**
+1. Liest Input-Datei (`IN_CSV`) → `df`
+2. Erkennt Spalten:
+   - `event_id` (aus möglichen Varianten: `"event_id"`, `"id"`, `"eid"`)
+   - `subject` (aus `"subject"`, `"subj"`)
+   - `date` (aus `"date"`, `"sent_at"`, `"timestamp"`)
+3. Parst Datum (`date_parsed = pd.to_datetime(date)`).
+4. Bereinigt Text:
+   - `text_clean = clean_simple(text_full)`
+   - Berechnet Zeichen- und Tokenlänge (`char_len`, `tok_len`)
+   - Flag `is_too_long` falls Text > `MAX_CHARS`
+5. Normalisiert Betreff (`subject_norm = norm_subject(subject)`).
+6. Sortiert nach `subject_norm`, `date_parsed`, `event_id`.
+7. Weist Thread-IDs zu:
+   - Neuer Thread bei geändertem `subject_norm` oder Zeitabstand > `THREAD_GAP_DAYS`.
+8. Ermittelt Thread-Roots:
+   - Gruppiert nach `thread_id`
+   - Ruft `pick_root()` auf
+   - Markiert `is_thread_root = True` bei Root-Events
+9. Schreibt:
+   - `events_clean.csv` (alle Events)
+   - `events_roots_for_topics.csv` (nur Root-Events mit `char_len <= MAX_CHARS`)
+10. Gibt Statistiken auf der Konsole aus.
+
+**Rückgabe:**  
+`pd.DataFrame` – DataFrame der Thread-Roots (`roots_df`).
+
+---
+
+### Hauptprogramm
+
+```python
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    clean_and_thread_events(env)
+
+Bei direkter Ausführung:
+
+Lädt setup_environment aus pipe.topics_flow.setup_env
+
+Initialisiert env
+
+Führt clean_and_thread_events(env) aus
+
+Eingaben / Ausgaben
+
+Eingaben:
+
+env["paths"]["clean_dir"]/events_patched_with_participants.csv
+
+Ausgaben:
+
+env["paths"]["clean_dir"]/events_clean.csv
+
+env["paths"]["clean_dir"]/events_roots_for_topics.csv
+
+Rückgabe: DataFrame der Thread-Root-Events
+
+Konsolenausgabe: Schreiboperationen und Zeilenstatistik
+
+Abhängigkeiten
+
+pandas as pd
+
+numpy as np
+
+re
+
+pathlib.Path
+
+typing.Dict, typing.Any
+
+Lokaler Import (bei direkter Ausführung):
+from pipe.topics_flow.setup_env import setup_environment
+
+## pipe/topics_flow/cluster_topic_pies.py
+
+**Zweck:**  
+Erzeugt Topic-Verteilungen pro organisationalem Cluster (z. B. Abteilung oder Team),  
+basierend auf der in `infomap_levels.csv` definierten Hierarchie.  
+Unterstützt zeitliche Aggregation (periodisch oder „rolling“).
+
+**Input:**  
+- `events_with_topics.csv` (aus vorherigem Schritt)  
+- `infomap_levels.csv` (aus Hierarchieebenen)  
+
+**Output:**  
+- `cluster_topic_pies.csv`  
+- `cluster_topic_pies_summary.csv` (pro Zeitraum oder global)  
+
+---
+
+### Funktion
+
+#### `cluster_topic_pies(env: dict) -> tuple[pd.DataFrame, pd.DataFrame]`
+Berechnet und exportiert Topic-Verteilungen nach Cluster und ggf. Zeitraum.
+
+**Parameter:**
+- `env`: `dict` mit Pfaden und Laufzeitoptionen:
+  - `env["outputs"]["topics_dir"]`: Pfad zum Topic-Output-Verzeichnis
+  - `env["outputs"]["org_dir"]`: Pfad zum Organisations-Output-Verzeichnis
+  - `env["paths"]["levels_csv"]`: Pfad zur `infomap_levels.csv`
+  - `env["runtime"]["time_mode"]`: `"off"`, `"periodic"` oder `"rolling"`
+  - `env["runtime"]["time_freq"]`: Zeitfrequenz, z. B. `"M"`
+  - `env["runtime"]["export_pies"]`: Optionaler bool-Flag für grafischen Export
+
+**Ablauf:**
+1. **Initialisierung & Prüfung**
+   - Liest `events_with_topics.csv` und `infomap_levels.csv`.
+   - Prüft auf Spalten `cluster_id`, `thread_topic_id`, `weight`.  
+     Falls `weight` fehlt:
+     - Wenn `probability` existiert → `weight = probability`
+     - Sonst, wenn `event_id` existiert → `weight = 1.0`
+     - Andernfalls Fehler (`ValueError`).
+
+2. **Cluster-ID-Normalisierung**
+   - Entfernt Leerzeichen und formatiert numerische Cluster-IDs zu Strings ohne Nachkommastellen.
+
+3. **Zeitliche Dimension**
+   - Wenn `date` existiert:
+     - Parst Datum (`pd.to_datetime`)
+     - Entfernt `NaN`
+     - Berechnet Zeitperiode (`dt.to_period(time_freq)`)
+   - Wenn `date` fehlt:
+     - Setzt `"period" = "ALL"`
+
+4. **Gruppierungsschema**
+   - Wenn `time_mode != "off"`:  
+     Gruppiert nach `["period", "cluster_id", "thread_topic_id"]`
+   - Sonst:  
+     Gruppiert nach `["cluster_id", "thread_topic_id"]`
+
+5. **Aggregation**
+   - Aggregiert je Gruppierung:
+     - `weight`: Summe
+     - `n_events`: Anzahl
+     - `avg_prob`: Mittelwert der `weight`
+   - Berechnet Gesamtgewicht (`weight_total`) je Cluster/Periode.
+   - Anteil (`share = weight / weight_total`).
+
+6. **Label-Spalte**
+   - Falls `topic_label` fehlt: erstellt `"topic_label" = "topic_" + thread_topic_id`
+   - Falls vorhanden: merged eindeutige Labels aus `events`.
+
+7. **Zusammenfassung (Top 3 Topics pro Cluster)**
+   - Sortiert innerhalb von Gruppen nach Gewicht absteigend.
+   - Gibt aus:
+     - `n_topics` (Anzahl der berücksichtigten Topics)
+     - `top_topics` (Format: `"TopicX (p%) / TopicY (q%)"`)
+     - `total_weight` (Summe der Gewichte)
+   - Aggregiert in `pies_summary`.
+
+8. **Export**
+   - Erzeugt Zielverzeichnis (`org_dir`).
+   - Wenn `time_mode == "off"`:
+     - Exportiert:
+       - `cluster_topic_pies.csv`
+       - `cluster_topic_pies_summary.csv`
+   - Wenn zeitlich (`periodic` / `rolling`):
+     - Exportiert separate Dateien pro Periode (`_YYYY-MM`).
+
+9. **Optionaler Mini-Pie-Export**
+   - Wenn `export_pies` aktiviert:
+     - Importiert `pipe.topics_flow.utils.export_cluster_pies`
+     - Exportiert Mini-Pie-Charts nach `org_dir/viz/pies`
+     - Bei Fehlern: Warnung auf Konsole
+
+10. **Rückgabe**
+    - Gibt `(pies, pies_summary)` als Tuple zurück.
+
+---
+
+### Eingaben / Ausgaben
+
+**Eingaben:**
+- `env["outputs"]["topics_dir"]/events_with_topics.csv`
+- `env["paths"]["levels_csv"]/infomap_levels.csv`
+
+**Ausgaben:**
+- `env["outputs"]["org_dir"]/cluster_topic_pies.csv`
+- `env["outputs"]["org_dir"]/cluster_topic_pies_summary.csv`
+- (Optional) `env["outputs"]["org_dir"]/viz/pies/` (Visualisierungen)
+- Konsolenausgabe: Lade-, Export- und Statusmeldungen
+
+---
+
+### Rückgabewerte
+
+| Name | Typ | Beschreibung |
+|------|-----|---------------|
+| `pies` | `pd.DataFrame` | Aggregierte Topic-Verteilungen pro Cluster (und ggf. Periode) |
+| `pies_summary` | `pd.DataFrame` | Zusammenfassung mit Top-Topics pro Cluster (und ggf. Periode) |
+
+---
+
+### Hauptprogramm
+
+```python
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    cluster_topic_pies(env)
+
+Bei direkter Ausführung:
+
+Lädt env via setup_environment
+
+Führt cluster_topic_pies(env) aus
+
+Abhängigkeiten
+
+pandas as pd
+
+numpy as np
+
+pathlib.Path
+
+re
+
+Optional (bei export_pies=True):
+from pipe.topics_flow.utils import export_cluster_pies
+
+Lokaler Import (bei direkter Ausführung):
+from pipe.topics_flow.setup_env import setup_environment
+
+## pipe/diagnose_cluster_pies.py
+
+**Zweck:**  
+Explorative Analyse und Plausibilitätsprüfung der Cluster–Topic-Verteilungen.  
+Erstellt Übersichtstabellen, Statistiken, Heatmaps und Heuristik-Warnungen auf Basis der von `cluster_topic_pies.py` erzeugten Daten.
+
+**Erwartete Eingaben:**  
+- `reports/orgchart/cluster_topic_pies.csv`  
+- `reports/orgchart/cluster_topic_pies_summary.csv` *(optional)*  
+
+**Ausgabe:**  
+- Konsolenausgaben (Statistiken, Heuristikberichte)  
+- Matplotlib-Plots (Heatmap, Histogramme)  
+
+---
+
+### Funktion
+
+#### `diagnose_cluster_pies(env: dict) -> None`
+Analysiert die Verteilungen von Topics in organisationalen Clustern, erkennt Monokulturen und generiert grafische und statistische Übersichten.
+
+**Parameter:**
+- `env`: `dict` – Environment-Dictionary mit mindestens:
+  - `env["outputs"]["org_dir"]`: Pfad, der die Dateien `cluster_topic_pies.csv` und ggf. `cluster_topic_pies_summary.csv` enthält.
+
+**Ablauf:**
+1. **Pfaddefinition & Leseoperation:**
+   - `OUT_PIES = org_dir / "cluster_topic_pies.csv"`
+   - `OUT_PIES_SUMMARY = org_dir / "cluster_topic_pies_summary.csv"`
+   - Liest `pies = pd.read_csv(OUT_PIES)`  
+     Optional: `summary = pd.read_csv(OUT_PIES_SUMMARY)` falls vorhanden.
+
+2. **Spaltenprüfung:**
+   - Erwartete Spalten: `{"cluster_id","thread_topic_id","weight","share"}`
+   - Bricht mit `AssertionError` ab, falls Spalten fehlen.
+
+3. **Grundstatistik:**
+   - Anzahl Cluster, Topics, Gesamtzeilen.
+   - Aggregiert `weight` je Cluster (`cluster_weight`).
+   - Gibt die 10 größten Cluster nach Gesamtgewicht aus.
+
+4. **Dominanzanalyse:**
+   - Bestimmt pro Cluster das Topic mit dem höchsten Anteil (`dominant_topic`, `dominant_share`).
+   - Zeigt Top 10 nach Anteil.
+   - Ermittelt „Monokultur“-Cluster (`dominant_share ≥ 0.80`).
+   - Gibt ggf. die 20 höchsten Monokulturen aus.
+
+5. **Globale Topic-Verteilung:**
+   - Aggregiert Gesamtgewicht pro Topic (`topic_weight`).
+   - Berechnet Anteil am globalen Gewicht (`topic_weight_share_global`).
+   - Gibt Top 10 Topics nach Textmenge aus.
+
+6. **Heatmap-Erstellung:**
+   - Wählt die 12 Topics mit höchstem Gesamtgewicht (`TOP_N_TOPICS = 12`).
+   - Pivotiert zu `heat = pies.pivot_table(index="cluster_id", columns="thread_topic_id", values="share")`.
+   - Zeichnet Heatmap (`plt.imshow`) mit `colorbar(label="share")`.
+
+7. **Histogramm der Cluster-Gewichte:**
+   - Erstellt Histogramm von `tot["cluster_weight"]` (40 Bins).
+   - Achsenbeschriftung und Titel:
+     - `"Verteilung Gesamtgewicht (Textmenge) pro Cluster"`
+
+8. **Cross-Check mit Summary (optional):**
+   - Wenn `summary` geladen:
+     - Zeigt Beispielausschnitt (Top 20) mit vorhandenen Spalten aus  
+       `["cluster_id","thread_topic_id","weight","share","Name","topic_label"]`.
+
+9. **Heuristik-Prüfungen:**
+   - Cluster mit `weight <= 0`
+   - Topics, die nur in einem Cluster vorkommen
+   - Hohe Dominanz (`dominant_share > 0.95`)
+   - Gibt Warnmeldungen oder „OK“ aus, wenn keine Auffälligkeiten bestehen.
+
+**Rückgabe:**  
+Keine. Ergebnisse werden ausschließlich in Konsole und Matplotlib-Plots ausgegeben.
+
+---
+
+### Hauptprogramm
+
+```python
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    diagnose_cluster_pies(env)
+
+
+Bei direkter Ausführung:
+
+Lädt env über setup_environment
+
+Führt die Analyse diagnose_cluster_pies(env) aus
+
+Eingaben / Ausgaben
+
+Eingaben:
+
+env["outputs"]["org_dir"]/cluster_topic_pies.csv
+
+env["outputs"]["org_dir"]/cluster_topic_pies_summary.csv (optional)
+
+Ausgaben:
+
+Textausgabe in Konsole:
+
+Cluster-, Topic-, und Gewichtstatistiken
+
+Dominanz- und Monokultur-Bericht
+
+Heuristik-Warnungen
+
+Matplotlib-Grafiken:
+
+Heatmap der Top-Topics pro Cluster
+
+Histogramm der Cluster-Gesamtgewichte
+
+Abhängigkeiten
+
+pathlib.Path
+
+pandas as pd
+
+numpy as np
+
+matplotlib.pyplot as plt
+
+Lokaler Import (bei direkter Ausführung):
+from pipe.topics_flow.setup_env import setup_environment
+
+
+## pipe/diagnose_flows.py
+
+**Zweck:**  
+Diagnostik und Plausibilitätsprüfung der erzeugten Topic-Flussdaten.  
+Liest die in `reports/orgchart/` erzeugten CSV-Dateien ein, prüft ihre Konsistenz und gibt  
+Statistiken, Beispiel-Flüsse und potenzielle Artefakte auf der Konsole aus.  
+Keine Schreibvorgänge.
+
+**Beispiel:**
+```python
+from pipe.setup_env import setup_environment
+from pipe.diagnose_flows import diagnose_flows
+
+env = setup_environment()
+diagnose_flows(env)
+
+Funktion
+diagnose_flows(env: dict) -> None
+
+Führt eine Plausibilitätsprüfung der generierten Topic-Flussdaten durch und zeigt Statistiken und Artefakte an.
+
+Parameter:
+
+env: dict – Environment-Dictionary mit:
+
+env["outputs"]["org_dir"]: Verzeichnis, in dem die Flussdateien gespeichert sind.
+
+Eingelesene Dateien (alle im org_dir):
+
+topic_flow_edges_by_level.csv
+
+topic_flow_edges_total.csv
+
+topic_distribution_by_sender_level.csv
+
+topic_distribution_by_recipient_level.csv
+
+events_with_thread_topics.csv
+
+Voraussetzungen:
+Alle obigen Dateien müssen existieren (sonst AssertionError).
+
+Ablauf
+
+Dateiprüfung und Laden
+
+Prüft die Existenz aller erwarteten Dateien.
+
+Liest CSVs in DataFrames:
+
+flow, flow_total, send_dist, rec_dist, events_tt.
+
+Überblick
+
+Gibt grundlegende Statistiken aus:
+
+Anzahl der Events mit Topics
+
+Anzahl der Flusskanten (flow)
+
+Aggregierte Flüsse (flow_total)
+
+Anzahl Kombinationen von Sender- bzw. Empfänger-Level × Topic
+
+Erkennung der Topic-Spalte
+
+Prüft mehrere mögliche Spaltennamen in flow oder events_tt:
+
+Kandidaten: ["thread_topic_id","topic_active","topic","Topic"]
+
+Wählt die erste gefundene Spalte.
+
+Wenn keine vorhanden → Warnung und Abbruch der Analyse.
+
+Topic-Statistiken
+
+Top 15 Topics nach Häufigkeit (Events):
+
+value_counts() der Topic-Spalte in events_tt
+
+Top 10 Topics nach Gewicht (Flows):
+
+Gruppierung von flow nach Topic und Summierung von weight.
+
+Beispielhafte Flüsse
+
+Wählt Spalten mit "sender_" oder "recipient_" im Namen.
+
+Fügt Topic- und Gewichtsspalten hinzu.
+
+Gibt Top 10 Flüsse (nach weight) tabellarisch aus.
+
+Dominante Topics pro Sender-Level
+
+Bestimmt erste Spalte von send_dist als Level-Spalte (lvl_col).
+
+Gruppiert nach Level, zeigt je Level die Top 5 Topics nach share.
+
+Spaltenauswahl: [topic_col, "weight", "share"].
+
+Artefakt-Check
+
+Prüft flow nach möglichen Label-Spalten:
+
+Kandidaten: ["Name","topic_name_active","topic_label"]
+
+Falls vorhanden:
+
+Sammelt alle Labeltexte und sucht verdächtige Tokens:
+["hou","ect","enronxgate","corp","gco","na","javaMail","thyme"]
+
+Gibt gefundene Tokens aus.
+
+Falls keine Label-Spalte vorhanden:
+
+Gibt Hinweis aus, dass Labels nicht gemappt sind.
+
+Rückgabe
+
+Keine.
+Alle Ergebnisse werden ausschließlich in der Konsole ausgegeben.
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    diagnose_flows(env)
+
+Bei direkter Ausführung:
+
+Lädt Umgebung mit setup_environment()
+
+Führt die Analyse diagnose_flows(env) aus
+
+Eingaben / Ausgaben
+
+Eingaben:
+
+env["outputs"]["org_dir"]/topic_flow_edges_by_level.csv
+
+env["outputs"]["org_dir"]/topic_flow_edges_total.csv
+
+env["outputs"]["org_dir"]/topic_distribution_by_sender_level.csv
+
+env["outputs"]["org_dir"]/topic_distribution_by_recipient_level.csv
+
+env["outputs"]["org_dir"]/events_with_thread_topics.csv
+
+Ausgaben:
+
+Konsolenausgabe:
+
+Statistiken über Flüsse und Topics
+
+Beispielhafte Flüsse (Top 10)
+
+Dominanzanalyse je Sender-Level
+
+Verdächtige Tokens in Topic-Labels
+
+Abhängigkeiten
+
+pathlib.Path
+
+pandas as pd
+
+Lokaler Import (bei direkter Ausführung):
+from pipe.topics_flow.setup_env import setup_environment
+
+
+## pipe/diagnose_topic_flows.py
+
+**Zweck:**  
+Analyse und Plausibilitätsprüfung der thematischen Kommunikationsflüsse zwischen Clustern, basierend auf `topic_flows.csv`.  
+Ermittelt Basisstatistiken, wendet Filter an, zeigt Top-Kanten und Top-Themen, ermöglicht Detailansichten und speichert gefilterte Ergebnisse.  
+
+**Output:**  
+- `reports/orgchart/topic_flows_filtered.csv`  
+- Konsolenausgaben und optionale Matplotlib-Grafiken (Heatmaps, Histogramme)
+
+---
+
+### Funktion
+
+#### `diagnose_topic_flows(env: dict) -> None`
+Analysiert und filtert Kommunikationsflüsse zwischen organisationalen Clustern.
+
+**Parameter:**
+- `env`: `dict` – Environment-Dictionary mit:
+  - `env["outputs"]["org_dir"]`: Pfad zum Organisationsberichtverzeichnis mit den Flussdaten.
+
+---
+
+### Ablauf
+
+1. **Dateipfade und Einlesen**
+   - `FLOW_IN = org_dir / "topic_flows.csv"`
+   - `FLOW_OUT = org_dir / "topic_flows_filtered.csv"`
+   - Liest `flows = pd.read_csv(FLOW_IN)`
+   - Prüft Existenz der Datei (`assert FLOW_IN.exists()`)
+
+2. **Parameter / Settings**
+   - `EXCLUDE_NOISE = True` – Entfernt Topics mit ID -1
+   - `MIN_EDGE_WEIGHT = 5000` – Mindest-Gewicht (Zeichenmenge pro Kante)
+   - `MIN_EDGE_EVENTS = 3` – Mindestanzahl von Events pro Kante
+   - `FOCUS_TOPICS_N = None` – Optional: nur Top-N Topics berücksichtigen
+   - `SHOW_TOPIC = None` – Optional: detaillierte Analyse eines bestimmten Topics
+
+3. **Spaltenprüfung**
+   - Erwartete Spalten:  
+     `{"sender_cluster","recipient_cluster","thread_topic_id","weight","n_events"}`
+   - Abbruch bei fehlenden Spalten (`AssertionError`).
+
+4. **Basisstatistik**
+   - Anzahl Kanten (`Edges`) und Topics
+   - Minimum, Median, 95%-Perzentil des Gewichts (`weight`)
+
+5. **Filterung**
+   - Entfernt Rauschen (`thread_topic_id != -1`) falls `EXCLUDE_NOISE = True`
+   - Filtert Kanten nach:
+     - `weight >= MIN_EDGE_WEIGHT`
+     - `n_events >= MIN_EDGE_EVENTS`
+   - Optional: Beschränkt auf Top-N Topics nach Gewicht (`FOCUS_TOPICS_N`)
+
+6. **Gefilterte Übersicht**
+   - Gibt neue Anzahl von Kanten und Topics aus.
+   - Zählt Self-Loops (`sender_cluster == recipient_cluster`) und Cross-Cluster-Verbindungen.
+
+7. **Top-Kanten**
+   - Zeigt die 15 Kanten mit höchstem Gewicht.
+
+8. **Topic-Statistik**
+   - Summiert Gewicht pro Topic (`topic_weight`).
+   - Gibt die 10 Topics mit dem höchsten Gesamtgewicht aus.
+
+9. **Top-K Topics – stärkste Kanten**
+   - Für die Top 5 Topics nach Gesamtgewicht:
+     - Zeigt die 5 stärksten Kanten je Topic (`sender_cluster`, `recipient_cluster`, `weight`, `n_events`).
+
+10. **Detailansicht einzelner Topics (optional)**
+    - Wenn `SHOW_TOPIC` gesetzt:
+      - Filtert alle Kanten zu diesem Topic.
+      - Erstellt Pivot-Matrix (`sender_cluster × recipient_cluster` → `weight`).
+      - Zeigt Matrix, falls sie ≤ 30×30 groß ist.
+      - Erstellt Histogramm der Gewichte (`plt.hist`).
+
+11. **Export**
+    - Schreibt gefilterte Tabelle in `topic_flows_filtered.csv`.
+    - Gibt Filterparameter auf der Konsole aus:
+      - Noise-Filter, Mindestgewicht, Mindestanzahl Events, ggf. Top-N.
+
+---
+
+### Rückgabe
+Keine.  
+Alle Ergebnisse werden in der Konsole angezeigt und in `topic_flows_filtered.csv` geschrieben.  
+Grafiken werden über Matplotlib ausgegeben.
+
+---
+
+### Eingaben / Ausgaben
+
+**Eingaben:**
+- `env["outputs"]["org_dir"]/topic_flows.csv`
+
+**Ausgaben:**
+- `env["outputs"]["org_dir"]/topic_flows_filtered.csv`
+- Konsolenausgaben:
+  - Statistiken, Top-Kanten, Themenübersichten
+- (Optional) Matplotlib-Plots:
+  - Histogramm pro Topic (bei `SHOW_TOPIC` gesetzt)
+
+---
+
+### Hauptprogramm
+
+```python
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    diagnose_topic_flows(env)
+Bei direkter Ausführung:
+
+Lädt env über setup_environment
+
+Führt diagnose_topic_flows(env) aus
+
+Abhängigkeiten
+
+pandas as pd
+
+numpy as np
+
+pathlib.Path
+
+matplotlib.pyplot as plt
+
+Lokaler Import (bei direkter Ausführung):
+from pipe.topics_flow.setup_env import setup_environment
+
+## pipe/topics_flow/export_network_viz.py
+
+**Zweck:**  
+Erzeugt eine interaktive, hierarchische Netzwerkvisualisierung der organisationalen Topic-Struktur  
+mithilfe von **pyvis**. Verknüpft Knoten, Labels und optionale Mini-Pie-Images zu einem HTML-Netzwerkdiagramm.
+
+**Input:**  
+- `viz/nodes_topics.csv`  
+- `viz/edges_topics.csv`  
+- *(optional)* `viz/cluster_labels.csv`  
+- *(optional)* `viz/pies/cluster_pies_index.csv`  
+
+**Output:**  
+- `viz/org_topics_hier.html` – interaktive HTML-Netzwerkansicht  
+
+---
+
+### Funktion
+
+#### `export_network_viz(env: dict, topic_filter=None, min_edge_weight=None, hide_self_loops=True, bg_color="#ffffff", max_width=8.0, width_quantile=0.9, height_px=900, hierarchical_direction="UD", debug=False) -> None`
+
+Erstellt ein hierarchisches Netzwerkdiagramm (Knoten = Cluster, Kanten = Flüsse) aus vorhandenen CSV-Dateien.
+
+**Parameter:**
+| Name | Typ | Beschreibung |
+|------|-----|---------------|
+| `env` | `dict` | Environment-Dictionary mit Ausgabepfaden (`env["outputs"]["org_dir"]`) |
+| `topic_filter` | optional | Filter für bestimmte Topics (nicht implementiert im Code) |
+| `min_edge_weight` | optional | Mindestgewicht der Kanten (nicht aktiv verwendet) |
+| `hide_self_loops` | `bool` | Selbstverbindungen (A→A) unterdrücken |
+| `bg_color` | `str` | Hintergrundfarbe (Default: Weiß) |
+| `max_width` | `float` | Maximale Kantenbreite (nicht direkt genutzt) |
+| `width_quantile` | `float` | Quantilgrenze für Kantengewichte (nicht genutzt) |
+| `height_px` | `int` | Höhe des Diagramms in Pixeln |
+| `hierarchical_direction` | `str` | Richtung der Hierarchie („UD“ = Up-Down, „LR“ = Left-Right etc.) |
+| `debug` | `bool` | Debug-Ausgaben aktivieren |
+
+---
+
+### Ablauf
+
+1. **Pfaddefinitionen**
+   - `org_dir = env["outputs"]["org_dir"]`
+   - `viz_dir = org_dir / "viz"` → erstellt Ordner bei Bedarf.
+   - Erwartete Dateien:
+     - `nodes_topics.csv`
+     - `edges_topics.csv`
+     - `cluster_labels.csv` *(optional)*
+
+2. **Laden der Daten**
+   - Liest `nodes` und `edges` mit `pandas.read_csv`.
+   - Prüft Existenz der Dateien (`assert`-Abbruch bei Fehler).
+
+3. **Label-Mapping**
+   - Falls `cluster_labels.csv` vorhanden:
+     - Sucht Spalten:
+       - ID-Spalte: eine aus `["id", "cluster_id", "node_id"]`
+       - Label-Spalte: eine aus `["label", "topic_label"]`
+     - Erstellt Dictionary `label_map = {id → label}`
+   - Andernfalls: Warnung (`[warn] Keine cluster_labels.csv gefunden`)
+
+   **Hilfsfunktion:**  
+   `find_hierarchical_label(node_id: str)` – durchsucht hierarchische Präfixe (`a:b:c`) nach bekannten Labeln.
+
+4. **Spaltenerkennung**
+   - Node-ID-Spalte: `["node_id", "id", "cluster_id"]`
+   - Kantenquellen: `["src", "source", "sender_cluster"]`
+   - Kantenziele: `["dst", "target", "recipient_cluster"]`
+   - Kantengewicht: `"weight"` falls vorhanden
+
+5. **PyVis-Netzwerkaufbau**
+   - Erstellt `Network()`-Objekt:
+     - Directed, statisch (ohne Physics), Hintergrundfarbe konfigurierbar.
+   - Setzt Hierarchieoptionen:
+     ```json
+     {
+       "layout": {"hierarchical": {"direction": "UD", "sortMethod": "directed"}},
+       "physics": {"enabled": false}
+     }
+     ```
+
+6. **Mini-Pie-Integration (optional)**
+   - Erwartet `viz/pies/cluster_pies_index.csv` mit Spalten `cluster_id`, `pie_path`.
+   - Falls vorhanden:
+     - Erstellt Mapping `{cluster_id → Pfad zur Pie-Grafik}`.
+     - Gibt Beispielzeilen aus.
+   - Sonst Warnung (`⚠️ Keine Pie-Images gefunden`).
+
+7. **Knoten hinzufügen**
+   - Iteriert über alle Zeilen in `nodes`:
+     - `node_id` = ID-Spalte als String
+     - `label` = aus `label_map`, hierarchischer Fallback oder `node_id`
+     - Kürzt Label auf 80 Zeichen (`short_label`)
+     - Falls Mini-Pie verfügbar:
+       - `shape="image"` + Pfad zur Grafik
+     - Andernfalls Standard-Knoten (`group="org_cluster"`)
+   - Zählt Knoten mit Bild / Label-Zuordnung (`[label-stats]`).
+
+8. **Kanten hinzufügen**
+   - Iteriert über `edges`:
+     - Überspringt Selbstverbindungen (`src == dst`, wenn `hide_self_loops=True`)
+     - Prüft, ob beide Knoten im Set `valid_nodes` existieren
+     - Gewicht (`w`) und Farbe (`color`, Default `#999999`)
+     - Fügt gerichtete Kante hinzu (`net.add_edge(src, dst, value=w, color=color)`)
+
+9. **Export**
+   - Speichert interaktives HTML unter:
+     ```
+     viz/org_topics_hier.html
+     ```
+   - Gibt Statistik aus:
+     - Anzahl Knoten, Anzahl Kanten
+   - Meldet Abschluss:
+     ```
+     ✅ [export_network_viz] fertig.
+     ```
+
+---
+
+### Rückgabe
+Keine.  
+Erstellt `org_topics_hier.html` im `viz`-Unterordner.
+
+---
+
+### Eingaben / Ausgaben
+
+**Eingaben:**
+- `env["outputs"]["org_dir"]/viz/nodes_topics.csv`
+- `env["outputs"]["org_dir"]/viz/edges_topics.csv`
+- *(optional)* `env["outputs"]["org_dir"]/viz/cluster_labels.csv`
+- *(optional)* `env["outputs"]["org_dir"]/viz/pies/cluster_pies_index.csv`
+
+**Ausgaben:**
+- `env["outputs"]["org_dir"]/viz/org_topics_hier.html`
+- Konsolenausgaben über `print`
+
+---
+
+### Abhängigkeiten
+
+- `os`, `json`
+- `pandas as pd`
+- `pathlib.Path`
+- `pyvis.network.Network`
+- Lokaler Import (bei direkter Ausführung):  
+  `from pipe.topics_flow.setup_env import setup_environment`
+
+
+## pipe/inspect_metatopics.py
+
+**Zweck:**  
+Überprüft und veranschaulicht die Ergebnisse einer Meta-Topic-Reduktion.  
+Zeigt:
+- die Verteilung der MetaTopics über alle Events,  
+- die Zuordnung ursprünglicher Subtopics zu den MetaTopics,  
+- und Beispieltexte pro MetaTopic.  
+
+**Beispiel:**
+```python
+from pipe.setup_env import setup_environment
+from pipe.inspect_metatopics import inspect_metatopics
+
+env = setup_environment()
+inspect_metatopics(env)
+
+Funktion
+inspect_metatopics(env: dict, examples_per_meta: int = 3) -> None
+
+Analysiert die Metatopic-Zuordnung und erzeugt Übersichtstabellen und Beispielausgaben.
+
+Parameter:
+
+env: dict – Environment-Dictionary mit Pfaden:
+
+env["outputs"]["topics_dir"] – Pfad zu Topic-Ergebnissen.
+
+examples_per_meta: int – Anzahl der Beispieltexte pro MetaTopic (Standard: 3).
+
+Ablauf
+
+Pfaddefinitionen
+
+topics_dir = Path(env["outputs"]["topics_dir"])
+
+red_dir = topics_dir / "reduced"
+
+Eingabedateien:
+
+events_with_metatopics.csv
+
+topic_map_old_to_meta.csv
+
+topic_info_meta.csv
+
+topic_info.csv
+
+Gibt deren Existenz per [paths check] aus.
+
+Dateien laden
+
+evm = pd.read_csv(EV_META_CSV) – Events mit MetaTopics
+
+map_tm = pd.read_csv(MAP_CSV) – Mapping von Original-Topics zu MetaTopics
+
+meta_info = pd.read_csv(META_INFO) – Info zu MetaTopics
+
+ti = pd.read_csv(TOPIC_INFO) – Originale Topic-Infos
+
+Verteilung der MetaTopics
+
+dist = evm["MetaTopic"].value_counts().sort_index()
+
+Ausgabe: Häufigkeit jedes MetaTopics über alle Events
+
+Zuordnung ursprünglicher Subtopics
+
+Benennt Spalten aus topic_info um (Topic → topic_old, Name → name_old, Count → count_old)
+
+Merged map_tm mit ti2
+
+Gruppiert nach topic_meta:
+
+Wählt bis zu 5 häufigste ursprüngliche Subtopics pro MetaTopic (TopSubtopicNames)
+
+Verknüpft Ergebnis mit meta_info:
+
+Erzeugt Tabelle meta_view mit Spalten:
+
+Topic (MetaTopic-ID)
+
+Name (MetaTopic-Name)
+
+Count (Häufigkeit)
+
+TopSubtopicNames (verkettete Subtopic-Namen)
+
+Ausgabe: Meta-Topic-Übersicht
+
+Gibt Tabelle mit Topic, Name, Count, TopSubtopicNames auf Konsole aus.
+
+Beispieltexte pro MetaTopic
+
+Sucht Spalten:
+
+Event-ID: "event_id" (oder erste Spalte im DataFrame)
+
+Text: eine aus ["text_full", "body_text", "text", "body"]
+
+Falls Textspalte vorhanden:
+
+Gibt für jedes MetaTopic bis zu examples_per_meta Beispieltexte (max. 300 Zeichen) aus.
+
+Falls keine Textspalte: Hinweismeldung.
+
+Rückgabe
+
+Keine.
+Alle Ergebnisse werden ausschließlich auf der Konsole ausgegeben.
+
+Eingaben / Ausgaben
+
+Eingaben:
+
+env["outputs"]["topics_dir"]/reduced/events_with_metatopics.csv
+
+env["outputs"]["topics_dir"]/reduced/topic_map_old_to_meta.csv
+
+env["outputs"]["topics_dir"]/reduced/topic_info_meta.csv
+
+env["outputs"]["topics_dir"]/topic_info.csv
+
+Ausgaben:
+
+Konsolenausgaben:
+
+Existenzprüfung der Dateien
+
+Verteilung der MetaTopics
+
+Zuordnung der Top-Subtopics
+
+Beispieltexte pro MetaTopic
+
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    inspect_metatopics(env)
+Bei direkter Ausführung:
+
+Lädt env über setup_environment()
+
+Führt inspect_metatopics(env) aus
+
+Abhängigkeiten
+
+pathlib.Path
+
+pandas as pd
+
+Lokaler Import (bei direkter Ausführung):
+from pipe.topics_flow.setup_env import setup_environment
+
+## pipe/label_metatopics.py
+
+**Zweck:**  
+Erzeugt automatische Labels für MetaTopics auf Basis einer **c-TF-IDF-Analyse**.  
+Das Skript generiert mehrere Ausgabedateien, die zur späteren manuellen oder halbautomatischen Validierung genutzt werden können.
+
+**Erzeugte Dateien:**
+- `meta_labels_auto.csv` – vollständige Liste der automatisch extrahierten Phrasen  
+- `meta_topic_label_map.csv` – Zuordnung jedes MetaTopics zu einem primären Label  
+- `topic_info_meta_labeled.csv` – erweiterte Metatopic-Info mit primären Labels  
+
+**Beispiel:**
+```python
+from pipe.setup_env import setup_environment
+from pipe.label_metatopics import label_metatopics
+
+env = setup_environment()
+label_metatopics(env)
+
+Funktion
+label_metatopics(env: dict, top_k: int = 8, top_show: int = 3) -> None
+
+Erzeugt automatische MetaTopic-Labels mithilfe von c-TF-IDF aus allen zugehörigen Texten.
+
+Parameter:
+| Name       | Typ    | Beschreibung                                                                |
+| ---------- | ------ | --------------------------------------------------------------------------- |
+| `env`      | `dict` | Environment mit Schlüssel `env["outputs"]["topics_dir"]`                    |
+| `top_k`    | `int`  | Anzahl der besten n-Gramme, die je MetaTopic gesammelt werden (Standard: 8) |
+| `top_show` | `int`  | Anzahl der angezeigten Label-Kandidaten pro MetaTopic (Standard: 3)         |
+Ablauf
+
+Pfaddefinitionen
+
+topics_dir = env["outputs"]["topics_dir"]
+
+reduced_dir = topics_dir / "reduced"
+
+Eingabedateien:
+
+events_with_metatopics.csv
+
+topic_info_meta.csv
+
+Ausgabedateien:
+
+meta_labels_auto.csv
+
+meta_topic_label_map.csv
+
+topic_info_meta_labeled.csv
+
+Hilfsfunktion find_col(df, candidates)
+
+Gibt die erste Spalte aus candidates zurück, die im DataFrame vorhanden ist.
+
+Wird für flexible Spaltenzuordnung genutzt.
+
+Spaltenerkennung
+
+MetaTopic-Spalte: eine aus
+["MetaTopic", "topic_meta", "meta_topic", "metatopic"]
+
+Textspalten: eine oder mehrere aus
+["text_clean", "body_text", "text_full", "subject"]
+
+Abbruch (KeyError), wenn keine Textspalte vorhanden ist.
+
+Textvorbereitung
+
+Kombiniert die erkannten Textspalten zu einer neuen Spalte _text_for_label.
+
+Bereinigt Text (Funktion clean_text):
+
+Entfernt URLs, E-Mails, Zeitstempel, Sonderzeichen, überflüssige Leerzeichen.
+
+Entfernt „Artefakt-Tokens“ (z. B. enron, ect, hou, unsubscribe).
+
+Vektorisierung
+
+Verwendet CountVectorizer mit Parametern:
+
+ngram_range=(1, 3)
+
+min_df=2
+
+max_df=0.9
+
+stop_words="english"
+
+Berechnet anschließend TfidfTransformer ohne Normalisierung (norm=None).
+
+Aggregation pro MetaTopic
+
+Gruppiert Events nach MetaTopic → zusammengeführter Text pro Topic.
+
+Berechnet TF-IDF-Matrix (X_tfidf).
+
+Kandidatenauswahl
+
+Für jedes MetaTopic:
+
+Sortiert alle N-Gramme nach TF-IDF-Gewicht.
+
+Filtert Artefakte (is_artifact(phrase)).
+
+Bereinigt Zahlen, Whitespace etc.
+
+Wählt die Top-K Phrasen (Standard: 8), davon die besten 3 als Label-Vorschau.
+
+Speichert alle Kandidaten in meta_labels_auto.csv.
+
+Primäres Label bestimmen
+
+Hilfsfunktion pick_primary(row):
+
+Bevorzugt Phrasen mit 2–3 Wörtern.
+
+Sonst erstes nicht-leeres Label.
+
+Fallback: "MetaTopic N".
+
+Erstellt meta_topic_label_map.csv mit Spalten:
+
+MetaTopic, primary_label.
+
+Mergen mit Topic-Info
+
+Findet Spalte "Topic" (oder Alternativen) in topic_info_meta.csv.
+
+Merged ti mit label_map → ti_labeled.
+
+Speichert topic_info_meta_labeled.csv.
+
+Konsolen-Preview
+
+Zeigt Kopf der Auto-Labels (Top 10).
+
+Rückgabe
+
+Keine.
+Ergebnisse werden als CSVs exportiert und auf der Konsole ausgegeben.
+
+Eingaben / Ausgaben
+
+Eingaben:
+
+env["outputs"]["topics_dir"]/reduced/events_with_metatopics.csv
+
+env["outputs"]["topics_dir"]/reduced/topic_info_meta.csv
+
+Ausgaben:
+
+env["outputs"]["topics_dir"]/reduced/meta_labels_auto.csv
+
+env["outputs"]["topics_dir"]/reduced/meta_topic_label_map.csv
+
+env["outputs"]["topics_dir"]/reduced/topic_info_meta_labeled.csv
+
+Konsolenausgaben: erkannte Spalten, Statistiken, Label-Vorschau
+
+Abhängigkeiten
+
+pathlib.Path
+
+re
+
+pandas as pd
+
+numpy as np
+
+sklearn.feature_extraction.text.CountVectorizer
+
+sklearn.feature_extraction.text.TfidfTransformer
+
+Lokaler Import (bei direkter Ausführung):
+from pipe.topics_flow.setup_env import setup_environment
+
+## pipe/patch_events.py
+
+**Zweck (kurz):**  
+`events.csv` + `event_actor.csv` zusammenführen, E-Mails normalisieren, Rollen vereinheitlichen, Teilnehmerlisten aggregieren. Output: `events_patched_with_participants.csv`.
+
+---
+
+### Funktionen
+
+- `read_df_guessing(path: Path) -> pd.DataFrame`  
+  CSV-Leser mit Encoding-Fallbacks: `"utf-8"`, `"utf-8-sig"`, `"latin-1"`; sonst `engine="python"`.
+
+- `normalize_email(x: str) -> str | None`  
+  Extrahiert/normalisiert E-Mail via Regex `<?([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})>?` (case-insensitiv). Gibt getrimmte Adresse oder `NaN`.
+
+- `split_multi(value) -> list[str]`  
+  Zerlegt Mehrfachangaben per Regex `[;, ]+`; normalisiert jede E-Mail mit `normalize_email`; filtert leere.
+
+- `agg_participants(df: pd.DataFrame) -> pd.Series`  
+  Aggregiert pro `event_id` Listen je Rolle (`FROM/TO/CC/BCC`), mappt `REPLY-TO → TO`, dedupliziert stabil.  
+  Rückgabe-Felder:
+  - `from_email: str|NaN` (erstes `FROM`)
+  - `to_emails, cc_emails, bcc_emails: list[str]`
+  - `n_participants: int` (Unique über alle Rollen)
+
+- `to_json_list(x) -> str`  
+  JSON-Serialisierung mit `ensure_ascii=False`; Fallback `"[]"`.
+
+- `patch_events_with_participants(env: Dict[str, Any]) -> pd.DataFrame`  
+  **I/O:**  
+  - **Input (im `clean_dir`):** `events.csv`, `event_actor.csv`  
+  - **Output (im `clean_dir`):** `events_patched_with_participants.csv`  
+  **env:** erwartet `env["paths"]["clean_dir"]`.
+
+  **Schritte:**  
+  1) **Laden:** `E_raw = read_df_guessing(events.csv)`, `A_raw = read_df_guessing(event_actor.csv)`.  
+  2) **Spalten-Heuristik (Events):**  
+     - ID: erste aus `{event_id, id, eid}` → `event_id` (Pflicht)  
+     - Text: `{text_full, body, text}` → `text_full`; wenn fehlt: `text_full = " ".join(str(v) for v in row if str)`  
+     - Betreff: `{subject, subj}` → `subject` (falls vorhanden)  
+     - Datum: `{date, timestamp, sent_at}` → `date` (falls vorhanden)  
+  3) **Spalten-Heuristik (Actors):**  
+     - ID: `{event_id, id, eid}` → `event_id`  
+     - Rolle: `{role_in_event, role, header}` → `role_in_event`  
+     - E-Mail: `{email, address, actor_email}` → `email`  
+     (alle drei Pflicht)  
+  4) **Normalisierung:**  
+     - `A["email"] = normalize_email(email)`; entferne `NaN`.  
+     - Rollen-Mapping (lowercased): `{"from":"FROM","to":"TO","cc":"CC","bcc":"BCC","sender":"FROM","recipient":"TO"}`; sonst `.upper()`.  
+  5) **Aggregation:** `Agg = A.groupby("event_id").apply(agg_participants)` → Serien zu DataFrame.  
+  6) **Merge:** `E2 = E.merge(Agg, on="event_id", how="left")`.  
+     - Fallback: wenn Originalspalten `from|to|cc|bcc` in `E_raw` existieren und Zielspalten fehlen:  
+       - `from → from_email` (mit `normalize_email`)  
+       - `to|cc|bcc → *_emails` (mit `split_multi`)  
+     - Sicherstellen, dass `to_emails|cc_emails|bcc_emails` existieren (ggf. leere Listen).  
+  7) **Qualitätsmetriken:**  
+     - `text_len = len(re.findall(r"\w+", text_full))`  
+     - `short_text_flag = text_len < 12`  
+  8) **Speichern:** Listenfelder (`to_emails|cc_emails|bcc_emails`) via `to_json_list` serialisieren; schreibe `events_patched_with_participants.csv`.  
+     - Konsolen-Preview: `event_id, from_email, n_participants, text_len` (Head).  
+  **Return:** `pd.DataFrame` (`E2_out`).
+
+---
+
+### Dateien / Spalten (Zielschema, Kernfelder)
+
+- `event_id: int|str`  
+- `text_full: str`  
+- `subject: str` *(optional, falls in Input)*  
+- `date: Any` *(optional, falls in Input)*  
+- `from_email: str|NaN`  
+- `to_emails, cc_emails, bcc_emails: list[str]` (im Output als JSON-Strings)  
+- `n_participants: int`  
+- `text_len: int`  
+- `short_text_flag: bool`
+
+---
+
+### Abhängigkeiten
+
+`pathlib.Path`, `pandas`, `numpy`, `re`, `json`, `typing` (`Dict`, `Any`)
+
+---
+
+### Ausführung (direkt)
+
+```python
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    patch_events_with_participants(env)
+
+
+## pipe/topics_flow/pipeline_master.py
+
+**Zweck:**  
+Zentrale Steuerungspipeline für das Leak-Project. Führt nacheinander alle Hauptschritte der Topic- und Cluster-Flow-Verarbeitung aus.
+
+---
+
+### Hauptfunktionen
+
+#### `run_stage(name: str, module: str) -> None`
+Führt ein Pipeline-Teilmodul aus und protokolliert Statusmeldungen.
+
+**Parameter:**
+- `name`: Anzeigename der Pipeline-Stufe.
+- `module`: vollqualifizierter Modulname (z. B. `"pipe.topics_flow.topic_flows"`).
+
+**Ablauf:**
+1. Gibt Startmeldung aus (`=== [STEP: name] ===`).
+2. Führt Modul im eigenen Namensraum mit `runpy.run_module(module, run_name="__main__")` aus.
+3. Bei Erfolg → Meldung `✅ [OK]`.
+4. Bei Fehler → Meldung `❌ [ERROR in name]: <Fehlertyp>` und rethrow des Fehlers.
+
+---
+
+#### `main() -> None`
+Führt die gesamte Topic-Flow-Pipeline aus.
+
+**Ablauf:**
+1. Gibt Startmeldung aus (`[TOPIC-FLOW MASTER PIPELINE START]`).
+2. Initialisiert `env` über `setup_environment()` (aus `pipe.topics_flow.setup_env`).
+3. Definiert und iteriert folgende Stufen:
+
+   | Stufe | Modul |
+   |--------|--------|
+   | `topic_flows_between_clusters` | `pipe.topics_flow.topic_flows_between_clusters` |
+   | `topic_flows` | `pipe.topics_flow.topic_flows` |
+   | `prepare_topic_colors_and_edges` | `pipe.topics_flow.prepare_topic_colors_and_edges` |
+   | `export_network_viz` | `pipe.topics_flow.export_network_viz` |
+
+4. Ruft für jede Stufe `run_stage(name, module)` auf.
+5. Gibt Abschlussmeldungen und erwartete Outputs aus:
+   - `reports/orgchart/topic_flows_filtered.csv`
+   - `reports/orgchart/viz/org_topics_hier.html`
+
+---
+
+### Direktaufruf
+
+```python
+if __name__ == "__main__":
+    main()
+Führt die gesamte Pipeline mit allen Schritten aus.
+
+Abhängigkeiten
+
+runpy
+
+pipe.topics_flow.setup_env.setup_environment
+
+## pipe/topics_flow/prepare_topic_colors_and_edges.py
+
+**Zweck:**  
+Erzeugt farbkodierte Topic-Kanten und Knotenlisten für das Organisationsnetzwerk.  
+Automatische Schema-Erkennung für alte und neue Topic-Flow-Formate.
+
+---
+
+### Funktion
+
+#### `prepare_topic_colors_and_edges(env: dict, period: str | None = None) -> None`
+
+**Eingaben:**
+- `env["outputs"]["org_dir"]/topic_flows_filtered.csv`
+- `env["outputs"]["org_dir"]/cluster_topic_pies_summary.csv`
+
+**Ausgaben:**
+- `viz/edges_topics.csv`  
+- `viz/nodes_topics.csv`  
+- `viz/topic_colors.csv`
+
+---
+
+### Ablauf (technisch)
+
+1. **Initialisierung**
+   - `org_dir`, `topics_dir` aus `env["outputs"]`
+   - Prüft Existenz beider Eingabedateien (Assertion).
+
+2. **Schema-Erkennung (flows)**
+   - Neues Schema erkannt, wenn Spalten:
+     - `sender_cluster`, `recipient_cluster`, `topic_active`
+     - → Umbenennung zu `source`, `target`, `topic_id`
+   - Altes Schema erkannt, wenn Spalten:
+     - `src`, `dst`, `thread_topic_id`
+     - → Umbenennung zu `source`, `target`, `topic_id`
+   - Pflichtspalten geprüft: `{"source", "target", "topic_id", "weight"}`
+
+3. **Schema-Erkennung (pies)**
+   - Falls vorhanden:
+     - `thread_topic_id` → `topic_id`
+     - `topic_active` → `topic_id`
+
+4. **Farbzuordnung**
+   - Alle eindeutigen `topic_id` aus `pies`
+   - Farbpalette: `matplotlib.colormaps["tab20"]`
+   - Zuordnung: `topic_id → RGBA`, dann in Hex konvertiert (`#RRGGBB`)
+   - Mapping: `flows["color"] = flows["topic_id"].map(color_hex)`, Default `#999999`
+
+5. **Kantenbreiten**
+   - `flows["width"] = log1p(weight) / max(log1p(weight)) * 10`
+
+6. **Edge-/Node-Erzeugung**
+   - Ordner `viz` erstellen (falls nicht vorhanden)
+   - `edges_topics.csv`: alle Flows + Spalten:
+     - `source`, `target`, `topic_id`, `weight`, `color`, `width`
+     - zusätzliche ID: `edge_id = "source||target||topic_id"`
+   - `nodes_topics.csv`: eindeutige `source` + `target` als `id`, `group="org_cluster"`
+   - `topic_colors.csv`: Mapping `topic_id,color`
+
+7. **Konsolenausgabe**
+   - Anzahl Edges, Nodes, Topics + Laufzeit in Sekunden.
+
+---
+
+### Rückgabe
+Keine. Ergebnisse werden als CSV-Dateien geschrieben.
+
+---
+
+### Abhängigkeiten
+- `pandas`, `numpy`, `matplotlib.colormaps`, `time`, `pathlib.Path`
+- Lokaler Import bei Direktaufruf:  
+  `from pipe.topics_flow.setup_env import setup_environment`
+
+
+## pipe/reduce_topics.py
+
+**Zweck:**  
+Reduziert BERTopic-Ergebnisse auf eine definierte Anzahl von Meta-Themen mittels **Agglomerative Clustering** auf Wortvektorebene.
+
+---
+
+### Funktion
+
+#### `reduce_topics_to_meta(env: Dict[str, Any], n_meta: int = 10) -> None`
+
+**Eingaben:**
+- `env["outputs"]["topics_dir"]/events_with_topics.csv`
+- `env["outputs"]["topics_dir"]/topic_info.csv`
+- `env["outputs"]["topics_dir"]/topic_words.csv`
+
+**Ausgaben (im Unterordner `reduced/`):**
+- `topic_map_old_to_meta.csv`
+- `events_with_metatopics.csv`
+- `topic_info_meta.csv`
+
+---
+
+### Ablauf (technisch)
+
+1. **Setup**
+   - `topics_dir`, `out_dir = topics_dir / "reduced"`  
+     → erstellt Unterordner.
+   - Prüft Existenz der Inputdateien (`events_with_topics`, `topic_info`, `topic_words`).
+
+2. **Spaltenerkennung**
+   - **Events (`ev`):**  
+     - `TOPIC_COL` aus `["thread_topic_id", "topic_id", "Topic", "topic"]`  
+     - `ID_COL` aus `["event_id", "doc_id", "row_id"]`
+   - **Topic Words (`tw`):**  
+     - `COL_T` = Topic-Spalte  
+     - `COL_W` = Word-Spalte  
+     - `COL_S` = Weight-Spalte (falls fehlt → `_w = 1.0`)
+
+3. **Matrixbildung**
+   - Pivot: `M = tw.pivot_table(index=COL_T, columns=COL_W, values=COL_S, fill_value=0.0)`
+   - Normierung: `M_norm = normalize(M.values, norm="l2", axis=1)`
+
+4. **Clustering**
+   - Distanzmatrix: `dist = cosine_distances(M_norm)`
+   - AgglomerativeClustering:
+     - `n_clusters = n_meta`
+     - `metric = "precomputed"`
+     - `linkage = "average"`
+   - Labels → Zuordnung alter Topics zu MetaTopics  
+     (`topic_old`, `topic_meta`)
+
+5. **MetaTopic-Größen**
+   - Ausgabe von Clustergrößen (`value_counts` nach `topic_meta`).
+
+6. **MetaTopic-Namen**
+   - Merging mit `topic_info` (`Topic`, `Name`, `Count` → `topic_old`, `name_old`, `count_old`)
+   - Pro MetaTopic:
+     - Aggregation: Top-3 Subtopic-Namen kombiniert (`" + "` getrennt)
+     - Summe der `Count`-Werte
+   - Fallback: falls `Name` leer → berechne `centroid_top_words(meta_id, k=5)`  
+     (durchschnittlicher Vektor → Top-5 Wörter mit höchster Gewichtung)
+
+7. **Events mappen**
+   - `ev["_topic_old"] = ev[TOPIC_COL].astype(float)`
+   - Mapping `old → meta` über Dictionary `mp`
+   - Neue Spalte: `MetaTopic`
+
+8. **Export**
+   - `topic_map_old_to_meta.csv`: Zuordnung alter zu neuen Topics
+   - `events_with_metatopics.csv`: Events mit `MetaTopic`
+   - `topic_info_meta.csv`: MetaTopic-Namen + Counts  
+     (`Topic`, `Name`, `Count`)
+
+---
+
+### Rückgabe
+Keine. Ergebnisse werden als CSV-Dateien im Unterordner `reduced/` gespeichert.
+
+---
+
+### Abhängigkeiten
+- `pandas`, `numpy`
+- `pathlib.Path`
+- `sklearn.preprocessing.normalize`
+- `sklearn.cluster.AgglomerativeClustering`
+- `sklearn.metrics.pairwise.cosine_distances`
+- `typing.Dict`, `typing.Any`
+
+
+## pipe/render_pie_icons.py
+
+**Zweck:**  
+Erzeugt runde Pie-Chart-Icons pro Cluster anhand der Topic-Verteilungsanteile aus `nodes_topics.csv`.  
+Diese Icons dienen als visuelle Marker für Netzwerke (Gephi, D3.js, Webmaps etc.).
+
+---
+
+### Funktion
+
+#### `render_pie_icons(env: dict) -> None`
+
+**Eingaben:**
+- `env["outputs"]["org_dir"]/viz/nodes_topics.csv`
+- `env["outputs"]["org_dir"]/viz/topic_colors.csv`
+
+**Ausgaben:**
+- Einzelne PNG-Dateien:  
+  `env["outputs"]["org_dir"]/viz/pies/<cluster_id>.png`
+
+---
+
+### Ablauf (technisch)
+
+1. **Pfaddefinitionen**
+   - `VIZ_DIR = org_dir / "viz"`
+   - Eingaben:
+     - `nodes_topics.csv`
+     - `topic_colors.csv`
+   - Ausgabeordner:
+     - `viz/pies/` (automatisch erstellt)
+
+2. **Daten laden**
+   - `nodes = pd.read_csv(NODES_CSV).set_index("id")`
+   - `tcols = pd.read_csv(TOPCOLORS)`
+   - Erzeugt Farbzuordnung:
+     - `topic_colors = {topic_id: color_hex}`
+
+3. **Topic-Spalten erkennen**
+   - Alle Spalten, die auf `_share` enden, werden als Anteilsspalten interpretiert.  
+     → `share_cols = [c for c in nodes.columns if c.endswith("_share")]`
+   - Topic-IDs aus Spaltennamen extrahiert (`int(c.split("_")[1])`).
+
+4. **Plot-Erzeugung**
+   - Iteration über alle Cluster (`id` = Index in `nodes`)
+   - Für jeden Cluster:
+     - `vals = row.values.astype(float)` → Topic-Anteile
+     - Überspringt Cluster mit Summe ≤ 0
+     - Farbfolge (`cols`) aus `topic_colors`
+     - Matplotlib-Piechart:
+       - `figsize=(0.9, 0.9)`, `dpi=200`
+       - `ax.pie(vals, colors=cols, radius=1.0, startangle=90)`
+       - Keine Achsen, gleiches Seitenverhältnis
+     - Dateiname: `cluster_id` → `safe_name` (`:`, `/` ersetzt durch `_`)
+     - Speichert als `<safe_name>.png` unter `viz/pies/`
+     - `bbox_inches="tight"`, `pad_inches=0`
+
+5. **Abschlussmeldung**
+   - Gibt Anzahl der erzeugten Cluster-Icons aus.
+
+---
+
+### Rückgabe
+Keine.  
+Schreibt PNG-Dateien und gibt Fortschritt auf Konsole aus.
+
+---
+
+### Abhängigkeiten
+- `pandas`, `numpy`
+- `matplotlib.pyplot` (Agg-Backend)
+- `pathlib.Path`
+- Lokaler Import bei Direktaufruf:  
+  `from pipe.topics_flow.setup_env import setup_environment`
+
+
+## pipe/route_topics.py
+
+**Zweck:**  
+Führt Events mit Topic-Informationen zu einem einheitlichen Format zusammen.  
+Je nach Einstellung (`use_meta=True/False`) werden entweder MetaTopics (reduzierte Themenebene) oder Original-Topics verwendet.
+
+---
+
+### Funktion
+
+#### `route_topics(env: dict, use_meta: bool = True) -> None`
+
+**Eingaben:**
+- `env["outputs"]["topics_dir"]/events_with_topics.csv`
+- `env["outputs"]["topics_dir"]/topic_info.csv`
+- *(bei `use_meta=True`)*  
+  - `topics_dir/reduced/events_with_metatopics.csv`
+  - `topics_dir/reduced/meta_topic_label_map.csv`  
+  - `topics_dir/reduced/topic_info_meta_labeled.csv`  
+  - `topics_dir/reduced/topic_info_meta.csv`
+
+**Ausgaben (in `topics_dir/reduced/`):**
+- `events_topics_active_meta.csv` oder `events_topics_active_orig.csv`
+- `events_topics_active.csv` *(Alias für nachfolgende Pipeline)*
+
+---
+
+### Ablauf (technisch)
+
+1. **Pfaddefinitionen**
+   - `topics_dir`, `reduced_dir`  
+   - Prüft Existenz der Eingabedateien; erstellt `reduced_dir` bei Bedarf.
+
+2. **Laden der Basisdaten**
+   - `ev_orig = pd.read_csv(events_with_topics.csv)`
+   - Bei `use_meta=True`: `ev_meta = pd.read_csv(events_with_metatopics.csv)`
+
+3. **Spaltenerkennung**
+   - Original-Topics (`ev_orig`):  
+     `ORIG_TOPIC_COL` = erste in `["thread_topic_id","topic_id","Topic","topic"]`
+   - Meta-Topics (`ev_meta`):  
+     `META_COL` = erste in `["MetaTopic","topic_meta","meta_id"]`
+   - Abbruch, falls relevante Spalten fehlen.
+
+4. **Label-Zuordnung (Meta)**
+   - Versucht nacheinander:
+     1. `meta_topic_label_map.csv` → Spalten (`MetaTopic`/`topic_meta`, `primary_label`)
+     2. `topic_info_meta_labeled.csv` → Spalten (`Topic`, `label`)
+     3. `topic_info_meta.csv` → Spalten (`Topic`, `Name`)
+   - Vereinheitlicht auf Schema:  
+     `meta_id`, `primary_label`
+
+5. **Routing**
+   - Wenn `use_meta=True`:  
+     - Merge: `ev_orig` + `ev_meta[["event_id", META_COL]]`  
+     - `topic_active = META_COL`  
+     - Merge mit `meta_label_map` → `topic_name_active`
+   - Wenn `use_meta=False`:  
+     - `topic_active = ORIG_TOPIC_COL`  
+     - Merge mit `topic_info[["Topic","Name"]]` → `topic_name_active`
+   - Ergebnis: vereinheitlichte Spalten  
+     `event_id`, `topic_active`, `topic_name_active`
+
+6. **Speichern**
+   - Hauptausgabe:
+     - `events_topics_active_meta.csv` oder `events_topics_active_orig.csv`
+   - Alias (für Pipeline):
+     - `events_topics_active.csv`
+   - Konsolenvorschau: erste drei Zeilen mit aktiven Topics.
+
+---
+
+### Rückgabe
+Keine.  
+CSV-Dateien werden in `topics_dir/reduced/` geschrieben.
+
+---
+
+### Abhängigkeiten
+- `pathlib.Path`
+- `pandas`
+- Lokaler Import bei Direktaufruf:  
+  `from pipe.topics_flow.setup_env import setup_environment`
+
+## pipe/select_hierarchy_levels.py
+
+**Zweck:**  
+Analysiert hierarchische Infomap-Leveldaten und wählt automatisch eine repräsentative Menge von Clustern pro Ebene aus.  
+Ziel: stabile, abdeckende Auswahl für Visualisierung oder Export.
+
+---
+
+### Funktion
+
+#### `select_hierarchy_levels(env: dict) -> None`
+
+**Eingaben:**
+- `data_derived/infomap_levels.csv` *(Pflicht)*
+- *(optional)* `reports/orgchart/cutoffs/cluster_stats_summary.csv`
+- *(optional)* `reports/orgchart/cutoffs/parent_child_*.csv`
+
+**Ausgaben:**
+- `reports/orgchart/selection_dynamic.json`
+- `reports/orgchart/selection_meta.json`
+
+---
+
+### Ablauf (technisch)
+
+1. **Pfad-Setup**
+   - `org_dir = env["outputs"]["org_dir"]`
+   - `cut_dir = env["outputs"]["cutoffs_dir"]` (Standard: `org_dir/cutoffs`)
+   - `levels_csv` standardmäßig aus `data_derived/infomap_levels.csv`
+   - Prüft Existenz der Datei, lädt in `H = pd.read_csv(levels_csv)`
+
+2. **Level-Spaltenerkennung**
+   - Sucht Spalten, die mit `"level_"` beginnen.  
+     → sortiert numerisch nach Level (`level_0`, `level_1`, …)
+   - Diese Spalten bilden die Hierarchiestufen.
+
+3. **Hilfsfunktionen**
+   - `_coverage_topk(counts, target=0.8)`  
+     → wählt Top-k IDs, die zusammen `target` (z. B. 80 %) der Vorkommen abdecken.
+   - `_pick_min_size(sizes)`  
+     → wählt minimale Clustergröße anhand des 95. Perzentils, mit Grenzen `[5, 20]`.
+   - `_build_parent_child(df, parent_lv, child_lv, cap_children=30)`  
+     → erzeugt Zuordnung Parent→Children (max. 30 Kinder) basierend auf Häufigkeiten.
+
+4. **Analyse pro Level**
+   Für jede `level_*`-Spalte:
+   - Berechne Clustergrößen (`value_counts`).
+   - Bestimme `min_size` via `_pick_min_size`.
+   - Filtere nur Cluster ≥ `min_size`.
+   - Wähle Top-Cluster mit `_coverage_topk(..., target=0.8)`.
+   - Speichere pro Level:
+     ```python
+     selection["keep"][LV] = [...]
+     selection["meta"][LV] = {
+         "min_size": ...,
+         "coverage": 0.8,
+         "kept": len(...),
+         "clusters_total": ...
+     }
+     ```
+   - Erzeuge Parent–Child-Beziehungen für nachfolgende Ebene.
+
+5. **Persistenz**
+   - Speichert:
+     - `selection_dynamic.json`: vollständige Struktur (`levels`, `keep`, `children`, `meta`)
+     - `selection_meta.json`: nur Metadaten (Größen, Coverage etc.)
+   - JSON mit `indent=2`.
+
+6. **Check-Ausgabe**
+   - Für jede Ebene:
+     ```
+     level_2: kept=42/180 | min_size=7
+     ```
+   - Bestätigung: `[ok] selection ist render-bereit`
+
+---
+
+### Rückgabe
+Keine.  
+Schreibt JSON-Dateien in `reports/orgchart/`.
+
+---
+
+### Abhängigkeiten
+- `pathlib.Path`
+- `json`
+- `pandas`, `numpy`
+- Lokaler Import bei Direktaufruf:  
+  `from pipe.topics_flow.setup_env import setup_environment`
+
+## selection_patch_flows.py
+
+**Zweck:**  
+Erweitert eine vorhandene hierarchische Cluster-Auswahl (`selection_nested`) um alle Cluster-Endpunkte,
+die in den `topic_flows_filtered.csv` vorkommen.  
+Sorgt dafür, dass die Hierarchie vollständig bleibt (inkl. Parent-Ketten).  
+
+---
+
+### Funktion
+
+#### `patch_selection_with_flows(cfg_path: str | Path, org_dir: str | Path, selection_nested: dict, max_k: int = 5, flow_level: int = 4) -> tuple[dict, list]`
+
+**Eingaben:**
+- `cfg_path`: YAML-Datei mit Pfadangaben (`cfg["paths"]["levels"]`)
+- `org_dir`: Ordner mit `topic_flows_filtered.csv`
+- `selection_nested`: bestehende verschachtelte Auswahlstruktur (z. B. aus `select_hierarchy_levels`)
+- `max_k`: maximale Hierarchietiefe (Default: 5)
+- `flow_level`: Level-ID der Flow-Zuordnung (Default: 4)
+
+**Ausgaben:**
+- `selection_patched`: aktualisierte Hierarchie (inkl. ergänzter Knoten)
+- `extra_edges`: Liste zusätzlicher Flow-Kanten auf `L{flow_level}`
+
+---
+
+### Ablauf (technisch)
+
+1. **Config & Daten laden**
+   - YAML-Konfig (`cfg_path`) → enthält Pfad zu `infomap_levels.csv`
+   - Erwartet:
+     - `cfg["paths"]["levels"]` → Pfad zu hierarchischen Leveldaten
+     - `org_dir/topic_flows_filtered.csv` → Flussdaten
+   - Beide Dateien müssen existieren.
+
+2. **Hilfsfunktionen**
+   - `ensure_all_levels(sel, max_k)`  
+     Ergänzt ggf. fehlende Level-Schlüssel `L1`…`Lk` im Auswahl-Dict.
+   - `mp_prefix(mp, k)`  
+     Kürzt einen Modulpfad (`a:b:c:d`) auf die ersten `k` Segmente.
+
+3. **Level-Mapping**
+   - Liest `infomap_levels.csv` (`H`)
+   - Baut Mapping `module_path[:flow_level] → level_{flow_level}`
+     ```python
+     mp2id = { "1:2:3:4": 1234, ... }
+     ```
+
+4. **Farbcodierung**
+   - Für alle eindeutigen `thread_topic_id` → Farbe aus `matplotlib.cm.tab20`
+   - `topic_color = {topic_id: "#rrggbb"}`
+
+5. **Flow-Mapping**
+   - Liest `topic_flows_filtered.csv`
+   - Mapped `sender_cluster`, `recipient_cluster` → `level_{flow_level}` IDs
+   - Ignoriert unvollständige oder Selbstkanten.
+   - Erstellt Liste `(level, src, dst, topic_id, weight)`
+
+6. **Aggregation & Edge-Erzeugung**
+   - Gruppiert nach `(level, src, dst, topic_id)` → summiert Gewichte
+   - Baut `extra_edges` mit Attributen:
+     - `level`, `src`, `dst`
+     - `width = max(1.5, weight/15000)`
+     - `color`, `label = f"topic {tid} • {int(w)}"`
+     - `arrows="to"`, `smooth=True`, `dashes=True`
+
+7. **Elternbeziehungen**
+   - Aus `H` für jede Zeile: `(L{i+1}, child_id) → (L{i}, parent_id)`
+   - `parents` dient später zum Hochverfolgen der Hierarchiekette.
+
+8. **Indexierung & Ergänzung**
+   - `index_children(sel)` → erstellt Lookup für `cid` pro Level
+   - `ensure_chain(sel, chain)` → fügt eine komplette Parent–Child-Kette hinzu, falls fehlend
+   - `chain_to_L1(Lk, cid)` → ermittelt gesamte Aufstiegskette bis L1
+
+9. **Patch-Anwendung**
+   - Identifiziert alle `needed_Lk` (alle Quell- & Ziel-Cluster in Flows auf `L{flow_level}`)
+   - Für jeden dieser Cluster:
+     - Baue Parent-Kette (`chain_to_L1`)
+     - Ergänze fehlende Knoten (`ensure_chain`)
+   - Ausgabe: gepatchte `selection_nested`
+
+10. **Rückgabe**
+    - `selection_patched`: vollständige, aktualisierte Auswahlhierarchie  
+    - `extra_edges`: Liste der ergänzenden Kantenobjekte  
+
+---
+
+### Rückgabeformat `extra_edges` (Beispiel)
+```python
+[
+  {
+    "level": "L4",
+    "src": 123,
+    "dst": 456,
+    "width": 2.1,
+    "color": "#1f77b4",
+    "label": "topic 3 • 8420",
+    "arrows": "to",
+    "smooth": True,
+    "dashes": True
+  },
+  ...
+]
+Abhängigkeiten
+
+pandas, matplotlib.cm, matplotlib.colors, itertools, json, yaml.safe_load
+
+pathlib.Path, copy.deepcopy
+
+## pipe/selection_to_nested.py
+
+**Zweck:**  
+Konvertiert die flache Auswahlstruktur (`selection_dynamic.json`), in der die Hierarchieebenen getrennt
+gespeichert sind, in eine verschachtelte Baumstruktur (`selection_nested.json`).
+
+---
+
+### Funktion
+
+#### `selection_to_nested(env: dict) -> dict`
+
+**Eingaben:**
+- `reports/orgchart/selection_dynamic.json`
+
+**Ausgaben:**
+- `reports/orgchart/selection_nested.json`
+- Rückgabe: `selection_nested` (als `dict`)
+
+---
+
+### Ablauf (technisch)
+
+1. **Dateipfade & Laden**
+   - `org_dir = env["outputs"]["org_dir"]`
+   - `sel_json = org_dir / "selection_dynamic.json"`
+   - Liest JSON → `sel_raw`
+
+2. **Level-Normalisierung**
+   - Extrahiert Levelnamen (`level_1`, `level_2`, …)
+   - Konvertiert zu Kurznamen `L1`, `L2`, `L3`, …
+     ```python
+     Lkeys = ["L1", "L2", "L3", ...]
+     ```
+
+3. **Keep-Mapping**
+   - Baut für jedes Level eine Menge der beibehaltenen IDs:
+     ```python
+     keep_map = { "L1": {1, 2, 3}, "L2": {5, 6}, ... }
+     ```
+
+4. **Parent–Child-Zuordnung**
+   - Liest aus `sel_raw["children"]` die Mapping-Struktur (z. B. `level_1` → `level_2`)
+   - Konvertiert Schlüssel und Werte zu numerischen IDs, falls möglich.
+   - Speichert als:
+     ```python
+     children_map[("L1","L2")] = { 1:[5,6], 2:[7,8] }
+     ```
+
+5. **Rekursive Aufbau-Funktion**
+   - `build_node(level_idx, cid)`:
+     - Erzeugt Knoten `{ "cid": id, "keep": True, "children": [...] }`
+     - Sucht Kinder aus `children_map` für nächstes Level
+     - Filtert Kinder, die in `keep_map` enthalten sind
+     - Ruft sich rekursiv auf, bis zur letzten Ebene
+
+6. **Baumaufbau**
+   - Top-Level = `L1`
+   - `selection_nested = {"L1": [build_node(0, cid) for cid in top_ids]}`
+   - Jeder Top-Knoten enthält verschachtelte `children` bis zum tiefsten Level.
+
+7. **Statistik & Export**
+   - `_count_nodes()` rekursiv: Anzahl aller Knoten.
+   - Ausgabe:
+     ```
+     [write] reports/orgchart/selection_nested.json | Ebenen: ['L1','L2','L3'] | Root=12 | total≈183
+     ```
+   - JSON mit `indent=2`.
+
+---
+
+### Rückgabeformat (Beispiel)
+```json
+{
+  "L1": [
+    {
+      "cid": 1,
+      "keep": true,
+      "children": [
+        {
+          "cid": 12,
+          "keep": true,
+          "children": [
+            {"cid": 1201, "keep": true, "children": []}
+          ]
+        }
+      ]
+    }
+  ]
+}
+
+
+Abhängigkeiten
+
+json
+
+pathlib.Path
+
+pandas (nur indirekt über andere Module, hier nicht genutzt)
+
+Lokaler Import bei Direktaufruf:
+from pipe.topics_flow.setup_env import setup_environment
+
+## pipe/setup_env.py
+
+**Zweck:**  
+Zentrale Setup-Routine für das *Leak-Project*.  
+Stellt sicher, dass das Git-Repository vorhanden ist, lädt die lokale YAML-Konfiguration,  
+löst Pfade auf und gibt eine konsistente `env`-Struktur für nachfolgende Pipeline-Module zurück.
+
+---
+
+### Hauptfunktion
+
+#### `setup_environment(repo_url="https://github.com/Jkoeppens/Leak-Project.git", config_src: Path | None = None) -> Dict[str, Any]`
+
+**Aufgaben:**
+1. Erkennung der Umgebung (Colab oder lokal)
+2. Git-Repository prüfen oder klonen
+3. Lokale YAML-Konfiguration kopieren (Drive oder `~/leak-project/config/local.yaml`)
+4. YAML laden und Pfade auflösen
+5. Ordnerstruktur vorbereiten (`data_clean`, `reports/`, `topics/`, `orgchart/`, `signif/`)
+6. Zusammenfassung als Dict ausgeben
+
+---
+
+### Komponenten
+
+#### 🔹 Colab Detection
+```python
+def in_colab() -> bool:
+    try:
+        import google.colab
+        return True
+    except Exception:
+        return False
+→ Gibt True zurück, wenn google.colab importierbar ist.
+
+def ensure_repo(repo_url: str, repo_dir: Path) -> Path:
+    if not repo_dir.exists():
+        subprocess.run(["git", "clone", "--depth", "1", repo_url, str(repo_dir)], check=True)
+    else:
+        subprocess.run(["git", "-C", str(repo_dir), "pull", "--ff-only"], check=True)
+→ Klont das Repo, falls es fehlt, oder führt git pull aus, falls vorhanden.
+
+🔹 Config Handling
+
+def copy_local_config(src_config: Path, dst_config: Path) -> None:
+    if (not dst_config.exists()) or (src_config.read_bytes() != dst_config.read_bytes()):
+        shutil.copyfile(src_config, dst_config)
+→ Synchronisiert lokale YAML-Config in config/local.yaml.
+
+def load_config(config_path: Path) -> Dict[str, Any]:
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
+🔹 Pfadauflösung
+
+def resolve_path(p: str, root: Path) -> Path:
+    pth = Path(p)
+    return pth if pth.is_absolute() else (root / pth)
+→ Macht relative Pfade innerhalb der Konfiguration robust gegen unterschiedliche Arbeitsverzeichnisse.
+
+Setup-Schritte im Detail
+
+Repo vorbereiten
+
+repo_dir = Path("/content/Leak-Project") if in_colab() else Path.cwd()
+ensure_repo(repo_url, repo_dir)
+Pfad zur lokalen Config
+
+Colab: /content/drive/MyDrive/leak-project/config/local.yaml
+
+Lokal: ~/leak-project/config/local.yaml
+
+YAML laden & Pfade auflösen
+cfg = load_config(dst_config)
+root = Path(cfg["paths"]["root"])
+clean_dir = resolve_path(cfg["paths"]["clean_dir"], root)
+levels_csv = resolve_path(cfg["paths"]["levels"], root)
+topics_dir = resolve_path(cfg["outputs"]["topics_dir"], root)
+org_dir = resolve_path(cfg["outputs"]["org_dir"], root)
+signif_dir = resolve_path(cfg["outputs"]["signif_dir"], root)
+
+Existenzprüfung
+
+[check files]
+  - events.csv: data_clean/events.csv ✅
+  - event_actor.csv: data_clean/event_actor.csv ✅
+  - levels.csv: config/levels.csv ❌
+
+Erstellen der Output-Ordner
+
+reports/topics/
+
+reports/orgchart/
+
+reports/signif/
+
+Ergebnisstruktur
+
+{
+  "IN_COLAB": false,
+  "REPO_DIR": "/content/Leak-Project",
+  "DST_CONFIG": "config/local.yaml",
+  "paths": {
+    "root": "...",
+    "clean_dir": ".../data_clean",
+    "levels_csv": ".../config/levels.csv"
+  },
+  "outputs": {
+    "topics_dir": ".../reports/topics",
+    "org_dir": ".../reports/orgchart",
+    "signif_dir": ".../reports/signif"
+  }
+}
+Ein Dictionary env, das von allen pipe.*-Modulen verwendet wird.
+Beispiel:
+from pipe.setup_env import setup_environment
+env = setup_environment()
+print(env["outputs"]["org_dir"])
+
+Abhängigkeiten
+
+os, sys, json, shutil, subprocess
+
+pathlib.Path
+
+yaml (PyYAML erforderlich)
+
+Optional: google.colab für Umgebungserkennung
+
+## pipe/topics_flow/topic_flows_between_clusters.py
+
+**Zweck (technisch):**  
+Erzeugt Topic-Flüsse zwischen Clustern aus `events.csv`, `event_actor.csv`, `infomap_levels.csv`, `events_with_thread_topics.csv`.  
+Output: `reports/orgchart/topic_flows.csv`.
+
+---
+
+### Funktion
+
+`topic_flows_between_clusters(env: Dict[str, Any]) -> None`
+
+**Erwartete Inputs (aus `env`):**
+- `env["paths"]["root"]` *(nicht direkt genutzt)*
+- `env["paths"]["clean_dir"]/events.csv`
+- `env["paths"]["clean_dir"]/event_actor.csv`
+- `env["paths"]["levels_csv"]` (Infomap-Level, Spalten u. a. `node`, `module_path`)
+- `env["outputs"]["org_dir"]/events_with_thread_topics.csv` (muss `thread_topic_id` enthalten)
+
+**Output:**
+- `env["outputs"]["org_dir"]/topic_flows.csv`  
+  Spalten laut Code: `cluster_sender, cluster_recipient, thread_topic_id, weight, n_events`
+
+---
+
+### Verarbeitungsschritte (knapp)
+
+1. **Laden:** `ev`, `ea`, `lv`, `et` via `pd.read_csv(...)`.
+2. **Kommunikationspaare:**  
+   - `senders = ea[role_in_event == "from"] → email_sender`  
+   - `recipients = ea[role_in_event == "to"] → email_recipient`  
+   - `pairs = merge(senders, recipients, on="event_id")`
+3. **Cluster-Mapping:**  
+   - Normalisiert `lv["node"]`, `email_sender`, `email_recipient` (trim/lower).  
+   - `cluster_map = lv.set_index("node")["module_path"].to_dict()`  
+   - `pairs["cluster_sender"] / ["cluster_recipient"] = map(cluster_map)`
+4. **Topic-Zuordnung:**  
+   - Prüft `thread_topic_id` in `et`.  
+   - `pairs = pairs.merge(et[["event_id","thread_topic_id"]], on="event_id", how="left")`
+5. **Filter:**  
+   - Entfernt `NaN` und `thread_topic_id == -1`.
+6. **Aggregation → Flüsse:**  
+   - Groupby `[cluster_sender, cluster_recipient, thread_topic_id]`  
+   - `weight = count(event_id)`  
+   - `n_events = nunique(event_id)`
+7. **Self-Loops entfernen:**  
+   - Drop `cluster_sender == cluster_recipient`.
+8. **Speichern:**  
+   - `flows.to_csv(out_csv, index=False)`
+
+---
+
+### Direktaufruf
+
+```python
+if __name__ == "__main__":
+    import sys
+    sys.path.append("/content/Leak-Project")
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    topic_flows_between_clusters(env)
+
+## pipe/topics_flow/topic_flows.py
+
+**Zweck (technisch):**  
+Erzeugt gerichtete Topic-Flows zwischen organisationalen Clustern basierend auf aggregierten Topic-Verteilungen.
+
+---
+
+### Funktion
+
+`topic_flows(env: dict, period: str | None = None) -> None`
+
+**Input-Dateien (aus `env`):**
+- `org_dir/cluster_topic_pies_summary.csv`
+- `org_dir/topic_distribution_by_level.csv`
+- `topics_dir/events_with_topics.csv` *(optional)*
+- `paths/levels_csv`
+- `topics_dir/topic_info_labels.csv` (mit Spaltenschema:  
+  `["Topic", "Name"]` oder `["topic_active","topic_name_active"]` oder `["Topic","topic_label"]`)
+
+**Output-Dateien:**
+- `org_dir/topic_flows_filtered.csv`
+- ggf. `org_dir/topic_flows_filtered_<PERIOD>.csv`
+
+**Output-Spalten:**
+`sender_cluster, recipient_cluster, topic_active, weight, n_events, topic_name_active, color, width, edge_id`
+
+---
+
+### Ablauf (technisch)
+
+1. **Label-Tabelle laden**
+   - Liest `topic_info_labels.csv`, erkennt Spaltenschema.
+   - Gibt DataFrame mit `topic_active`, `topic_name_active` zurück.
+
+2. **Eingabedateien prüfen**
+   - Erwartet `cluster_topic_pies_summary.csv`, `topic_distribution_by_level.csv`, `infomap_levels.csv`.
+   - Warnung, falls `events_with_topics.csv` fehlt.
+
+3. **Laden der Daten**
+   ```python
+   pies = pd.read_csv(pies_summary_path)
+   levels = pd.read_csv(levels_path)
+   ev_topics = pd.read_csv(events_with_topics_path)  # optional
+
+Zeitraumfilter (optional)
+
+Falls period angegeben und timestamp vorhanden:
+filtert ev_topics auf den gegebenen Zeitraum (z. B. "2001Q1").
+
+Cluster-Zuordnung vereinheitlichen
+
+pies → sender_cluster, recipient_cluster = sender_cluster
+
+Fehlende weight-Werte = 0
+
+Flows aggregieren
+
+Gruppierung:
+flows = pies.groupby(["sender_cluster", "recipient_cluster", "thread_topic_id"])["weight"].sum()
+
+n_events = round(weight)
+
+Spalte thread_topic_id → topic_active
+
+Labels joinen
+
+Merge mit label_table auf topic_active
+
+Warnung bei fehlenden Labels
+
+Metadaten
+
+color = "#1f77b4"
+
+width = weight / max(weight) * 8
+
+edge_id = sender_cluster||recipient_cluster||topic_active
+
+Speichern
+
+Standard: topic_flows_filtered.csv
+
+Falls period: periodischer Suffix ohne Sonderzeichen.
+
+Helper
+
+load_label_table(env)
+→ erkennt Schema von topic_info_labels.csv, vereinheitlicht Spaltennamen.
+→ Rückgabe: DataFrame[["topic_active", "topic_name_active"]].
+
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    topic_flows(env)
+
+
+## pipe/topics_flow/topics_flow.py
+
+**Zweck (technisch):**  
+Führt BERTopic auf bereinigten Thread-Root-Mails aus und erzeugt konsistente Topic-Ausgaben.
+
+---
+
+### Hauptfunktion
+
+`run_topic_model(env: Dict[str, Any], use_subset=False, subset_n=None, subset_frac=None, random_state=42) -> pd.DataFrame`
+
+**Input-Dateien:**
+- `clean_dir/events_roots_for_topics.csv` (Pfad: `env["paths"]["clean_dir"]`)
+  - Muss Spalte `text_clean` enthalten
+  - Optional: `is_thread_root`, `is_newsletter`
+
+**Output-Dateien (in `env["outputs"]["topics_dir"]`):**
+- `events_with_topics.csv`
+- `topic_info.csv`
+- `topic_words.csv`
+- `topic_info_labels.csv`
+- `topic_probabilities.npy` *(optional, falls Probabilities verfügbar)*
+
+---
+
+### Ablauf (technisch)
+
+1. **Laden & Filtern**
+   - Liest `events_roots_for_topics.csv`
+   - Filter:
+     - `is_thread_root == True`
+     - `is_newsletter == False`
+     - Tokenlänge ≥ `MIN_TOK_LEN` (= 12)
+   - Optional Subset:
+     - `subset_n` oder `subset_frac` zur Stichprobenbildung
+
+2. **Modelldefinition**
+   - `SentenceTransformer(EMBED_MODEL="all-MiniLM-L6-v2")`
+   - `CountVectorizer(stop_words='english', ngram_range=(1,2), min_df=2, max_df=0.95)`
+   - `umap.UMAP(n_neighbors=15, n_components=5, metric='cosine')`
+   - `hdbscan.HDBSCAN(min_cluster_size=15, min_samples=10, metric='euclidean')`
+   - `BERTopic(..., calculate_probabilities=True)`
+
+3. **Modelltraining**
+   ```python
+   topics, probs = topic_model.fit_transform(docs)
+topic_info = topic_model.get_topic_info()
+
+topic_words = topic_model.get_topic(topic_id) für alle Topics ≠ -1
+
+Topic-Zuordnung
+
+topic_id und topic_prob_max (höchste Wahrscheinlichkeit)
+
+Merge mit Originaldaten (event_id-basiert)
+
+Outputs
+
+events_with_topics.csv: Events × Topic-ID × Probability
+
+topic_info.csv: Übersicht der Topics (inkl. Noise = -1)
+
+topic_words.csv: Topic × Wörter × Scores
+
+topic_info_labels.csv: zusätzliche Spalte topic_label
+(erste 4 Wörter aus Name über label_from_info)
+
+topic_probabilities.npy: NumPy-Matrix aller Topic-Zuordnungen
+
+Logging
+
+Ausgabe der Anzahl Topics / Noise-Cluster
+
+Laufzeit (fit_transform in Sekunden)
+Helper
+
+label_from_info(name: str, n=4) -> str
+→ Kürzt Topic-Namen auf max. 4 Tokens für Label-Erstellung.
+
+Direktaufruf
+
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    run_topic_model(env, use_subset=False)
+
+## pipe/topics_flow/utils.py
+
+**Zweck (technisch):**  
+Hilfsfunktionen für grafische Exporte, insbesondere Pie-Charts pro Cluster.
+
+---
+
+### Funktion
+
+`export_cluster_pies(pies: pd.DataFrame, out_dir: Path) -> Path`
+
+**Input:**
+- `pies`: DataFrame mit Spalten  
+  `cluster_id`, `thread_topic_id`, `share`
+- `out_dir`: Zielverzeichnis (wird bei Bedarf angelegt)
+
+**Output:**
+- PNG-Dateien: `<cluster_id>.png` je Cluster  
+- CSV-Index: `cluster_pies_index.csv` mit Spalten  
+  `cluster_id, pie_path`  
+- Rückgabe: `Path` des Ausgabeverzeichnisses
+
+---
+
+### Ablauf (technisch)
+
+1. **Verzeichnis anlegen:**  
+   `out_dir.mkdir(parents=True, exist_ok=True)`
+
+2. **Gruppierung:**  
+   `pies.groupby("cluster_id")`
+
+3. **Pro Cluster:**
+   - Extrahiert `share`-Liste.
+   - Falls leer oder Summe = 0 → überspringen.
+   - Zeichnet `matplotlib.pyplot.pie(...)` mit `plt.cm.tab20.colors`.
+   - Speichert PNG unter `out_dir / f"{cid}.png"` (transparent, 120 dpi).
+   - Fügt `{"cluster_id": cid, "pie_path": out_path.name}` zum Index hinzu.
+
+4. **Index schreiben:**  
+   `cluster_pies_index.csv` im `out_dir`
+
+5. **Rückgabe:**  
+   `out_dir` (Pfadobjekt)
+
+---
+
+**Hinweis:**  
+Verwendet `matplotlib` im Non-GUI-Modus (`Agg`).
+
+## pipe/vis_org_topics.py
+
+**Zweck (technisch):**  
+Erzeugt ein interaktives hierarchisches Netzwerk (`pyvis`/`vis-network` HTML),  
+in dem Cluster-Knoten als thematische Pie-Icons dargestellt werden  
+und gerichtete, farbkodierte Topic-Kanten zeigen.
+
+---
+
+### Funktion
+
+`vis_org_topics(env: dict) -> None`
+
+**Input-Dateien:**
+- `reports/orgchart/viz/nodes_topics.csv`
+- `reports/orgchart/viz/edges_topics.csv`
+- `reports/orgchart/viz/pies/*.png`
+
+**Output-Datei:**
+- `reports/orgchart/viz/org_topics_hier.html`
+
+---
+
+### Ablauf (technisch)
+
+1. **Setup**
+   - Pfade aus `env["outputs"]["org_dir"]` gesetzt (`VIZ_DIR`, `PIE_DIR`, etc.).
+   - Lokale Parameter:
+     - `TOPIC_FILTER`, `MIN_EDGE_W`, `HIDE_SELF_LOOPS=True`
+     - `WIDTH_QUANTILE=0.9`, `MAX_WIDTH=8.0`, `BG_COLOR="#ffffff"`
+
+2. **Daten laden**
+   ```python
+   nodes = pd.read_csv(NODES_CSV)
+   edges = pd.read_csv(EDGES_CSV)
+Filter anwenden
+
+optional topic_id-Filter oder minimale Kantengewichte.
+
+Self-Loops entfernen.
+
+Kantenbreite skalieren
+
+quantilbasierte Deckelung (WIDTH_QUANTILE)
+
+width = 1 + (min(weight, cap)/cap)*(MAX_WIDTH-1)
+
+Hierarchieebene bestimmen
+nodes["level"] = nodes["id"].map(lambda cid: len(str(cid).split(":")))
+Tooltip & Pies
+
+Tooltip (title): Cluster-ID, total, top_topics
+
+has_pie: prüft Vorhandensein von <id>.png unter pies/
+
+Node-Darstellung:
+
+mit Pie: shape="image"
+
+ohne Pie: shape="dot", color="#bbbbbb"
+
+Netzwerk erzeugen
+
+Network(height="900px", width="100%", directed=True, bgcolor=BG_COLOR)
+
+vis.js-Optionen: hierarchisches Layout (Top-Down), statische Physik.
+
+Kanten: Farbe = color, Breite = width, Tooltip = Topic/Weight/n_events.
+
+Export
+
+net.show(HTML_OUT)
+
+Konsolenausgabe: Anzahl Nodes / Edges.
+
+Output-Spalten
+
+Nodes (nodes_topics.csv):
+id, node_weight_total?, top_topics?, level, title, has_pie
+
+Edges (edges_topics.csv):
+source, target, topic_id, weight, n_events, color, width
+
+Direktaufruf
+
+if __name__ == "__main__":
+    from pipe.topics_flow.setup_env import setup_environment
+    env = setup_environment()
+    vis_org_topics(env)
