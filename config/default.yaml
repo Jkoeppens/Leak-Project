@@ -54,8 +54,11 @@ outputs:
   cutoffs_dir: "{root}/reports/cutoffs"
   signif_dir: "{root}/reports/significance"
   org_dir: "{root}/reports/orgchart"
+  org_dir_viz: "{root}/reports/orgchart/viz"
+  org_dir_viz_pies: "{root}/reports/orgchart/viz/pies"
   topics_dir: "{root}/reports/topics"
   diagnostics_dir: "{root}/reports/diagnostics"
+  topics_dir_reduced: "{root}/reports/topics/reduced"
 
   # 👉 Erweiterte Unterverzeichnisse laut Audit
   org_dir_viz: "{root}/reports/orgchart/viz"
