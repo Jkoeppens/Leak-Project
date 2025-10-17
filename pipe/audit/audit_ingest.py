@@ -7,6 +7,13 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 import numpy as np
+import sys, os
+from pathlib import Path
+
+# --- Sicherstellen, dass Repo-Root im Pfad ist ---
+repo_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(repo_root))
+
 from config.config import load_config
 from pipe.ingest.ingest_core import ingest_core
 
