@@ -69,13 +69,12 @@ def _is_mail_file(p: Path):
     return False
 
 files = [p for p in raw_dir.rglob("*") if _is_mail_file(p)]
-    files = [p for p in raw_dir.rglob("*") if p.is_file()]
-    if sample_limit:
-        files = files[:sample_limit]
-    print(f"[Ingest] {len(files)} Dateien gefunden\n")
+if sample_limit:
+    files = files[:sample_limit]
+print(f"[Ingest] {len(files)} Dateien gefunden\n")
 
     # --- Container für Ergebnisse ---
-    records = []
+records = []
 
     for path in tqdm(files, desc="Parsing mails"):
         try:
