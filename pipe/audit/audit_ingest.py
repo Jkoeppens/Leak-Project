@@ -1,5 +1,6 @@
 # ============================================================
-# pipe/audit/audit_ingest.py – robuste Version
+# pipe/audit/audit_ingest.py
+# Robuster Audit-Lauf mit Typdiagnose und CSV/Markdown-Report
 # ============================================================
 
 from pathlib import Path
@@ -8,8 +9,9 @@ import pandas as pd
 from pipe.ingest.ingest_core import ingest_core
 from config.config import load_config
 
+
 def audit_ingest(cfg=None, per_owner_limit=500, max_owners=3):
-    """Führt Ingest + Audit aus und erzeugt Reports (mit Typ-Schutz)."""
+    """Führt Ingest + Audit aus und erzeugt Reports (mit Typdiagnose)."""
     if cfg is None:
         cfg = load_config()
 
@@ -22,16 +24,26 @@ def audit_ingest(cfg=None, per_owner_limit=500, max_owners=3):
 
     print("\n[STEP] Mail-Typisierung aktiv …")
 
+    # ------------------------------------------------------------
+    # 🔹 1️⃣ CSV laden
+    # ------------------------------------------------------------
     df = pd.read_csv(output_path)
+    print(f"[INFO] {len(df)} Zeilen geladen aus {output_path}")
 
-    # --- 🔧 Typkonvertierung
+    # ------------------------------------------------------------
+    # 🔹 2️⃣ Typkorrektur mit Diagnose
+    # ------------------------------------------------------------
     if "timestamp" in df:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+        print("[TYPE] timestamp →", df["timestamp"].dtype, "| NaT:", df["timestamp"].isna().sum())
 
     if "text_length" in df:
         df["text_length"] = pd.to_numeric(df["text_length"], errors="coerce")
+        print("[TYPE] text_length →", df["text_length"].dtype, "| NaN:", df["text_length"].isna().sum())
 
-    # --- 🔍 Zusammenfassung
+    # ------------------------------------------------------------
+    # 🔹 3️⃣ Audit-Berechnung
+    # ------------------------------------------------------------
     audit_path_md = Path(cfg["paths"]["clean_dir"]) / f"audit_ingest_{datetime.now().date()}_{datetime.now().strftime('%H-%M')}.md"
     audit_path_csv = Path(cfg["paths"]["clean_dir"]) / "audit_ingest_summary.csv"
 
@@ -49,11 +61,15 @@ def audit_ingest(cfg=None, per_owner_limit=500, max_owners=3):
         "length_mean": df["text_length"].mean() if "text_length" in df else None,
         "length_median": df["text_length"].median() if "text_length" in df else None,
         "length_max": df["text_length"].max() if "text_length" in df else None,
+        "include_ratio": df["include_in_analysis"].mean() if "include_in_analysis" in df else None,
         "run_timestamp": datetime.now().isoformat(),
     }
 
-    # --- 💾 Speichern
+    # ------------------------------------------------------------
+    # 🔹 4️⃣ Speichern der Reports
+    # ------------------------------------------------------------
     pd.DataFrame([summary]).to_csv(audit_path_csv, index=False)
+
     with open(audit_path_md, "w") as f:
         f.write("# Audit Ingest Report\n\n")
         for k, v in summary.items():
