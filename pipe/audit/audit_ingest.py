@@ -1,133 +1,54 @@
 # ============================================================
 # pipe/audit/audit_ingest.py
-# Leak-Project – Audit + Diagnose für Ingest-Core
-# Branch: consolidate/ingest-core
 # ============================================================
 
-import sys
 from pathlib import Path
 from datetime import datetime
-from string import Template
 import pandas as pd
-import numpy as np
-
-# ------------------------------------------------------------
-# 0️⃣ Repo-Pfad hinzufügen (für Colab oder lokale Läufe)
-# ------------------------------------------------------------
-repo_root = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(repo_root))
-
-# ------------------------------------------------------------
-# 1️⃣ Import interne Module
-# ------------------------------------------------------------
-from config.config import load_config
 from pipe.ingest.ingest_core import ingest_core
+from config.config import load_config
 
-try:
-    from pipe.ingest.flag_mail_types import flag_mail_types
-except ImportError:
-    flag_mail_types = None
+def audit_ingest(cfg=None, per_owner_limit=500, max_owners=3):
+    """Führt den Ingest + Audit aus und erzeugt Reports."""
+    if cfg is None:
+        cfg = load_config()
 
-# ------------------------------------------------------------
-# 2️⃣ Config laden + Platzhalter {root} auflösen
-# ------------------------------------------------------------
-cfg = load_config()
+    print("[CONFIG CHECK]")
+    print("raw_dir     :", cfg["paths"]["raw_dir"])
+    print("clean_dir   :", cfg["paths"]["clean_dir"])
+    print("\n[STEP] Ingest-Lauf startet …")
 
-root = cfg["paths"]["root"]
-for sec in ["paths", "outputs"]:
-    if sec in cfg:
-        for k, v in cfg[sec].items():
-            if isinstance(v, str) and "{root}" in v:
-                cfg[sec][k] = Template(v).safe_substitute(root=root)
+    output_path = ingest_core(cfg, per_owner_limit=per_owner_limit, max_owners=max_owners)
 
-print("\n[CONFIG CHECK]")
-for k in ("raw_dir", "clean_dir"):
-    print(f"{k:12s}: {cfg['paths'].get(k)}")
+    print("\n[STEP] Mail-Typisierung aktiv …")
 
-# ------------------------------------------------------------
-# 3️⃣ Ingest starten
-# ------------------------------------------------------------
-print("\n[STEP] Ingest-Lauf startet …")
-output_path = ingest_core(cfg, per_owner_limit=500, max_owners=3)
+    df = pd.read_csv(output_path)
+    audit_path_md = Path(cfg["paths"]["clean_dir"]) / f"audit_ingest_{datetime.now().date()}_{datetime.now().strftime('%H-%M')}.md"
+    audit_path_csv = Path(cfg["paths"]["clean_dir"]) / "audit_ingest_summary.csv"
 
-CLEAN_DIR = Path(cfg["paths"]["clean_dir"])
-output_path = Path(output_path)
+    summary = {
+        "file": str(output_path),
+        "rows": len(df),
+        "parse_ok": (df["parse_status"] == "ok").sum() if "parse_status" in df else len(df),
+        "missing_sender": df["sender"].isna().sum() if "sender" in df else None,
+        "missing_subject": df["subject"].isna().sum() if "subject" in df else None,
+        "missing_body": df["body_text"].isna().sum() if "body_text" in df else None,
+        "timestamp_min": df["timestamp"].min() if "timestamp" in df else None,
+        "timestamp_max": df["timestamp"].max() if "timestamp" in df else None,
+        "length_mean": df["text_length"].mean() if "text_length" in df else None,
+        "length_median": df["text_length"].median() if "text_length" in df else None,
+        "length_max": df["text_length"].max() if "text_length" in df else None,
+        "run_timestamp": datetime.now().isoformat()
+    }
 
-# ------------------------------------------------------------
-# 4️⃣ Daten laden
-# ------------------------------------------------------------
-try:
-    df = pd.read_csv(output_path, dtype=str)
-except Exception as e:
-    print(f"[ERROR] Konnte {output_path} nicht laden → {e}")
-    raise SystemExit(1)
+    pd.DataFrame([summary]).to_csv(audit_path_csv, index=False)
+    with open(audit_path_md, "w") as f:
+        f.write("# Audit Ingest Report\n\n")
+        for k, v in summary.items():
+            f.write(f"- **{k}**: {v}\n")
 
-df["text_length"] = pd.to_numeric(df.get("text_length"), errors="coerce")
-df["timestamp"] = pd.to_datetime(df.get("timestamp"), errors="coerce", utc=True)
+    print("\n[✅ Audit abgeschlossen]")
+    print("Markdown-Report:", audit_path_md)
+    print("CSV-Summary    :", audit_path_csv)
 
-# ------------------------------------------------------------
-# 5️⃣ Mail-Typisierung (optional)
-# ------------------------------------------------------------
-if flag_mail_types:
-    print("[STEP] Mail-Typisierung aktiv …")
-    df = flag_mail_types(df)
-else:
-    df["content_type"] = "normal"
-
-df["include_in_analysis"] = ~df["content_type"].isin(
-    ["newsletter", "empty_or_stub", "attachment_dump"]
-)
-
-# ------------------------------------------------------------
-# 6️⃣ Audit-Kennzahlen
-# ------------------------------------------------------------
-ts_min, ts_max = df["timestamp"].min(), df["timestamp"].max()
-length_stats = df["text_length"].describe(percentiles=[0.5, 0.9, 0.99]).to_dict()
-
-summary = {
-    "file": str(output_path),
-    "rows": len(df),
-    "parse_ok": (df["parse_status"] == "ok").sum(),
-    "parse_failed": (df["parse_status"] != "ok").sum(),
-    "missing_sender": df["sender"].isna().sum(),
-    "missing_subject": df["subject"].isna().sum(),
-    "missing_body": (df["body_text"].isna() | (df["body_text"].str.len() < 5)).sum(),
-    "timestamp_missing": df["timestamp"].isna().sum(),
-    "timestamp_min": ts_min,
-    "timestamp_max": ts_max,
-    "length_mean": float(length_stats.get("mean", 0)),
-    "length_median": float(length_stats.get("50%", 0)),
-    "length_max": float(length_stats.get("max", 0)),
-    "include_ratio": float(df["include_in_analysis"].mean()),
-    "run_timestamp": datetime.now().isoformat(),
-}
-
-# ------------------------------------------------------------
-# 7️⃣ Reports erzeugen
-# ------------------------------------------------------------
-TIMESTAMP = datetime.now().strftime("%Y-%m-%d_%H-%M")
-summary_df = pd.DataFrame([summary])
-
-md_path = CLEAN_DIR / f"audit_ingest_{TIMESTAMP}.md"
-csv_path = CLEAN_DIR / "audit_ingest_summary.csv"
-
-with open(md_path, "w") as f:
-    f.write(f"# 📊 Audit Report – Ingest-Core ({TIMESTAMP})\n\n")
-    for k, v in summary.items():
-        f.write(f"- **{k}**: {v}\n")
-    f.write("\n---\n## content_type-Verteilung\n")
-    f.write(df["content_type"].value_counts().to_markdown())
-    f.write("\n\n---\n## Top-Absender\n")
-    f.write(df["sender"].value_counts().head(10).to_markdown())
-
-summary_df.to_csv(csv_path, index=False)
-
-# ------------------------------------------------------------
-# 8️⃣ Konsolenausgabe
-# ------------------------------------------------------------
-print(f"\n[✅ Audit abgeschlossen]")
-print(f"Markdown-Report: {md_path}")
-print(f"CSV-Summary    : {csv_path}")
-print("\n[Result Summary]")
-for k, v in summary.items():
-    print(f"{k:22s}: {v}")
+    return summary
