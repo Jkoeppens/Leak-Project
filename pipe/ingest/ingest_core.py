@@ -1,75 +1,90 @@
 # ============================================================
 # pipe/ingest/ingest_core.py
-# Konsolidierte Ingest-Stufe für Leak-Project
+# Konsolidierte, audit-kompatible Ingest-Stufe für Leak-Project
+# Branch: consolidate/ingest-core
 # ============================================================
 
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, UTC
 import pandas as pd
-from tqdm import tqdm
 import hashlib, re, os
+from tqdm import tqdm
 
-# --- Klassifikationslogik importieren (eigene Datei)
-from pipe.ingest.flag_mail_types import flag_mail_types
+# --- Klassifikationslogik importieren
+try:
+    from pipe.ingest.flag_mail_types import flag_mail_types
+except ImportError:
+    flag_mail_types = None  # Fallback für isolierte Tests
 
-# --- Schema: robuste Spaltenstruktur
-COLUMNS = [
-    "event_id", "thread_id", "timestamp", "date_local",
-    "sender", "recipients_to", "recipients_cc", "n_recipients_total",
-    "subject", "body_text", "text_length",
-    "topics", "dominant_topic", "topic_labels",
-    "cluster_id", "cluster_level", "leader",
-    "in_degree", "out_degree", "centrality_zscore",
-    "source_file", "parse_status", "ingest_timestamp",
-    "content_type", "include_in_analysis"
-]
+# ============================================================
+# 1️⃣ Helper: {root}-Placeholder-Absicherung
+# ============================================================
+def _resolve_paths_inplace(cfg: dict):
+    """Ersetzt {root} in allen bekannten Sektionen sicher."""
+    if "paths" not in cfg or "root" not in cfg["paths"]:
+        return cfg
+    root = cfg["paths"]["root"]
+    for sec in ("paths", "outputs", "reports", "ingest"):
+        if sec in cfg:
+            for k, v in list(cfg[sec].items()):
+                if isinstance(v, str) and "{root}" in v:
+                    cfg[sec][k] = v.replace("{root}", root)
+    return cfg
 
-# ------------------------------------------------------------
-# Hauptfunktion
-# ------------------------------------------------------------
+
+# ============================================================
+# 2️⃣ Hauptfunktion: ingest_core
+# ============================================================
 def ingest_core(cfg, sample_limit=None):
+    """
+    Liest Mails aus data_raw, extrahiert Header + Body,
+    erzeugt events_master.csv inkl. Typisierung.
+    """
+    cfg = _resolve_paths_inplace(cfg)
+
     raw_dir = Path(cfg["paths"]["raw_dir"])
     clean_dir = Path(cfg["paths"]["clean_dir"])
     clean_dir.mkdir(parents=True, exist_ok=True)
-
     output_path = clean_dir / "events_master.csv"
 
     print(f"[Ingest] Using RAW dir: {raw_dir}")
-    files = list(raw_dir.rglob("*"))
+    print(f"[Ingest] Clean output : {clean_dir}")
+
+    # --- alle Maildateien suchen ---
+    files = [p for p in raw_dir.rglob("*") if p.is_file()]
     if sample_limit:
         files = files[:sample_limit]
-    print(f"[Ingest] {len(files)} Dateien gefunden")
+    print(f"[Ingest] {len(files)} Dateien gefunden\n")
 
+    # --- Container für Ergebnisse ---
     records = []
+
     for path in tqdm(files, desc="Parsing mails"):
-        if not path.is_file():
-            continue
         try:
-            with open(path, "r", errors="ignore") as f:
-                text = f.read()
+            text = Path(path).read_text(errors="ignore")
             if not text.strip():
                 continue
 
+            # Header-Felder extrahieren
+            sender = re.search(r"From:\s*(.*)", text)
+            subject = re.search(r"Subject:\s*(.*)", text)
+            date = re.search(r"Date:\s*(.*)", text)
+
+            body = text.split("\n\n", 1)[-1].strip()
             msg_id = hashlib.md5(text.encode("utf-8")).hexdigest()
-            sender_match = re.search(r"From:\s*(.*)", text)
-            subj_match = re.search(r"Subject:\s*(.*)", text)
-            date_match = re.search(r"Date:\s*(.*)", text)
-            body = text.split("\n\n", 1)[-1]
+            thread_id = hashlib.md5((sender.group(1) if sender else "").encode()).hexdigest()
 
             record = {
                 "event_id": msg_id,
-                "thread_id": hashlib.md5(
-                    (sender_match.group(1) if sender_match else "").encode()
-                ).hexdigest(),
-                "timestamp": pd.to_datetime(date_match.group(1), errors="coerce", utc=True)
-                if date_match else pd.NaT,
+                "thread_id": thread_id,
+                "timestamp": pd.to_datetime(date.group(1), errors="coerce", utc=True) if date else pd.NaT,
                 "date_local": None,
-                "sender": sender_match.group(1).strip() if sender_match else None,
+                "sender": sender.group(1).strip() if sender else None,
                 "recipients_to": None,
                 "recipients_cc": None,
                 "n_recipients_total": None,
-                "subject": subj_match.group(1).strip() if subj_match else None,
-                "body_text": body.strip(),
+                "subject": subject.group(1).strip() if subject else None,
+                "body_text": body,
                 "text_length": len(body),
                 "topics": None,
                 "dominant_topic": None,
@@ -82,25 +97,40 @@ def ingest_core(cfg, sample_limit=None):
                 "centrality_zscore": None,
                 "source_file": str(path.relative_to(raw_dir)),
                 "parse_status": "ok",
-                "ingest_timestamp": datetime.now(datetime.UTC).isoformat(),
+                "ingest_timestamp": datetime.now(UTC).isoformat(),
             }
             records.append(record)
-        except Exception:
+
+        except Exception as e:
             records.append({
                 "event_id": hashlib.md5(str(path).encode()).hexdigest(),
                 "source_file": str(path.relative_to(raw_dir)),
-                "parse_status": "failed"
+                "parse_status": f"failed: {e}"
             })
 
-    df = pd.DataFrame(records, columns=COLUMNS).fillna({"parse_status": "ok"})
+    # --- DataFrame erzeugen ---
+    df = pd.DataFrame(records)
+    if len(df) == 0:
+        print("[Ingest] Keine Datensätze erzeugt.")
+        df.to_csv(output_path, index=False)
+        return output_path
 
-    # --- Typisierung integrieren
-    df = flag_mail_types(df)
+    # --- Typisierung ergänzen (newsletter, stub, etc.) ---
+    if flag_mail_types:
+        df = flag_mail_types(df)
+    else:
+        df["content_type"] = "normal"
+
+    # --- Analyse-Zulassung ---
     df["include_in_analysis"] = ~df["content_type"].isin(
         ["newsletter", "empty_or_stub", "attachment_dump"]
     )
 
-    # --- Schreiben
+    # --- Ausgabe ---
     df.to_csv(output_path, index=False)
-    print(f"[Ingest] {len(df)} Datensätze → {output_path}")
+    print(f"\n[Ingest] {len(df)} Datensätze → {output_path}")
+    print("\n[content_type] Verteilung:\n", df["content_type"].value_counts())
+    print("\n[include_in_analysis] True-Anteil:",
+          (df["include_in_analysis"].mean() * 100).round(1), "%")
+
     return output_path
