@@ -1,18 +1,26 @@
 # ============================================================
-# Leak-Project Configuration Loader (fix für {root})
+# config/config.py – stabile Version mit rekursivem Merge
 # ============================================================
 
 from pathlib import Path
 import yaml, os
 
-def deep_update(base, updates):
+# ============================================================
+# 🔁 Rekursives Merging (ersetzt alte deep_update)
+# ============================================================
+def deep_update(base: dict, updates: dict) -> dict:
+    """Rekursives Update: ersetzt Werte und legt neue Keys an."""
     for k, v in updates.items():
-        if isinstance(v, dict) and k in base:
-            deep_update(base[k], v)
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            base[k] = deep_update(base.get(k, {}), v)
         else:
             base[k] = v
+    return base
 
-def resolve_placeholders(cfg):
+# ============================================================
+# 🧩 Platzhalter-Auflösung
+# ============================================================
+def resolve_placeholders(cfg: dict) -> dict:
     """Ersetzt {root} Platzhalter rekursiv in allen relevanten Sektionen."""
     root = cfg["paths"]["root"]
     for section in ["paths", "outputs", "reports", "ingest"]:
@@ -22,9 +30,12 @@ def resolve_placeholders(cfg):
                     cfg[section][k] = v.replace("{root}", root)
     return cfg
 
+# ============================================================
+# ⚙️ Konfigurationslader
+# ============================================================
 def load_config(
     default_path="config/default.yaml",
-    local_path="config/local.yaml",
+    local_path="/content/drive/MyDrive/leak-project/config/local.yaml",
     root_override=None
 ):
     default_path = Path(default_path)
@@ -35,18 +46,14 @@ def load_config(
         local_cfg = yaml.safe_load(open(local_path))
         deep_update(cfg, local_cfg)
 
+    # Root aus local.yaml, Environment oder Override
     root = (
         root_override
-        or os.environ.get("LEAK_ROOT")
         or cfg["paths"].get("root")
+        or os.environ.get("LEAK_ROOT")
         or str(default_path.parent.parent.resolve())
     )
+
     cfg["paths"]["root"] = root
     cfg = resolve_placeholders(cfg)
     return cfg
-
-if __name__ == "__main__":
-    cfg = load_config()
-    print("[config] root:", cfg["paths"]["root"])
-    print("[config] raw_dir:", cfg["paths"]["raw_dir"])
-    print("[config] clean_dir:", cfg["paths"]["clean_dir"])
