@@ -1,6 +1,6 @@
 # ============================================================
 # pipe/audit/audit_ingest.py
-# Robuster Audit-Lauf mit Typdiagnose und CSV/Markdown-Report
+# Robuster Ingest-Audit mit Typkorrektur und Markdown-Report
 # ============================================================
 
 from pathlib import Path
@@ -10,8 +10,14 @@ from pipe.ingest.ingest_core import ingest_core
 from config.config import load_config
 
 
+# ============================================================
+# 1️⃣ Hauptfunktion: audit_ingest
+# ============================================================
 def audit_ingest(cfg=None, per_owner_limit=500, max_owners=3):
-    """Führt Ingest + Audit aus und erzeugt Reports (mit Typdiagnose)."""
+    """
+    Führt den Ingest durch, prüft und protokolliert zentrale Qualitätsmetriken.
+    Erstellt CSV- und Markdown-Report im Clean-Verzeichnis.
+    """
     if cfg is None:
         cfg = load_config()
 
@@ -20,44 +26,37 @@ def audit_ingest(cfg=None, per_owner_limit=500, max_owners=3):
     print("clean_dir   :", cfg["paths"]["clean_dir"])
     print("\n[STEP] Ingest-Lauf startet …")
 
+    # --- Ingest ausführen ---
     output_path = ingest_core(cfg, per_owner_limit=per_owner_limit, max_owners=max_owners)
 
-    print("\n[STEP] Mail-Typisierung aktiv …")
-
-    # ------------------------------------------------------------
-    # 🔹 1️⃣ CSV laden
-    # ------------------------------------------------------------
+    # --- CSV laden ---
     df = pd.read_csv(output_path)
-    print(f"[INFO] {len(df)} Zeilen geladen aus {output_path}")
+    print(f"[LOAD] {len(df)} Zeilen aus {output_path}")
 
     # ------------------------------------------------------------
-    # 🔹 2️⃣ Typkorrektur mit Diagnostik & Schutz gegen NaN-Floats
+    # 🔧 2️⃣ Typkorrekturen (timestamp & text_length)
     # ------------------------------------------------------------
     if "timestamp" in df:
-        # Alle Werte zu String zwingen, float('nan') -> "nan"
+        # alles zu String wandeln, um float NaN loszuwerden
         df["timestamp"] = df["timestamp"].astype(str)
 
-        # Alle NaN-/leeren Strings entfernen
+        # leere / NaN / None Werte korrigieren
         df["timestamp"] = df["timestamp"].replace(
             {"nan": None, "NaN": None, "": None, "None": None}
         )
 
-        # Einheitlich parsen
+        # konvertieren in UTC-Datetimes
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
 
-        print("[TYPE] timestamp →", df["timestamp"].dtype)
-        print("  NaT count:", df["timestamp"].isna().sum())
+        print(f"[TYPE] timestamp dtype: {df['timestamp'].dtype}, NaT: {df['timestamp'].isna().sum()}")
 
     if "text_length" in df:
         df["text_length"] = pd.to_numeric(df["text_length"], errors="coerce")
-        print("[TYPE] text_length →", df["text_length"].dtype)
+        print(f"[TYPE] text_length dtype: {df['text_length'].dtype}")
 
     # ------------------------------------------------------------
-    # 🔹 3️⃣ Audit-Berechnung
+    # 🔍 3️⃣ Zusammenfassung berechnen
     # ------------------------------------------------------------
-    audit_path_md = Path(cfg["paths"]["clean_dir"]) / f"audit_ingest_{datetime.now().date()}_{datetime.now().strftime('%H-%M')}.md"
-    audit_path_csv = Path(cfg["paths"]["clean_dir"]) / "audit_ingest_summary.csv"
-
     summary = {
         "file": str(output_path),
         "rows": len(df),
@@ -73,24 +72,41 @@ def audit_ingest(cfg=None, per_owner_limit=500, max_owners=3):
         "length_median": df["text_length"].median() if "text_length" in df else None,
         "length_max": df["text_length"].max() if "text_length" in df else None,
         "include_ratio": df["include_in_analysis"].mean() if "include_in_analysis" in df else None,
-        "run_timestamp": datetime.now().isoformat(),
+        "run_timestamp": datetime.now().isoformat()
     }
 
     # ------------------------------------------------------------
-    # 🔹 4️⃣ Speichern der Reports
+    # 🗂️ 4️⃣ Reports schreiben
     # ------------------------------------------------------------
+    audit_dir = Path(cfg["paths"]["clean_dir"])
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    audit_path_md = audit_dir / f"audit_ingest_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.md"
+    audit_path_csv = audit_dir / "audit_ingest_summary.csv"
+
     pd.DataFrame([summary]).to_csv(audit_path_csv, index=False)
 
-    with open(audit_path_md, "w") as f:
-        f.write("# Audit Ingest Report\n\n")
+    with open(audit_path_md, "w", encoding="utf-8") as f:
+        f.write("# 📋 Audit Ingest Report\n\n")
         for k, v in summary.items():
             f.write(f"- **{k}**: {v}\n")
 
+    # ------------------------------------------------------------
+    # 🧾 5️⃣ Ausgabe an Konsole
+    # ------------------------------------------------------------
     print("\n[✅ Audit abgeschlossen]")
     print("Markdown-Report:", audit_path_md)
     print("CSV-Summary    :", audit_path_csv)
-    print("\n[Summary]")
+    print("\n[Result Summary]")
     for k, v in summary.items():
-        print(f"  {k:22}: {v}")
+        print(f"{k:<22}: {v}")
 
     return summary
+
+
+# ============================================================
+# 2️⃣ CLI-kompatibler Startpunkt (optional)
+# ============================================================
+if __name__ == "__main__":
+    cfg = load_config()
+    audit_ingest(cfg)
