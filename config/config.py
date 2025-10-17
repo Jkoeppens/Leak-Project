@@ -2,20 +2,20 @@
 # Leak-Project Configuration Loader
 # Compatible with both local and Colab/Drive environments
 # Branch: consolidate/ingest-core
+# Supports {root} placeholder syntax (Variante B)
 # ============================================================
 
 from pathlib import Path
 import yaml
-from string import Template
 import os
 
 # ------------------------------------------------------------
 # Helper: deep merge (local.yaml overrides default.yaml)
 # ------------------------------------------------------------
-def deep_update(base, updates):
+def deep_update(base: dict, updates: dict):
     """Recursively update dict 'base' with values from 'updates'."""
     for k, v in updates.items():
-        if isinstance(v, dict) and k in base and isinstance(base[k], dict):
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
             deep_update(base[k], v)
         else:
             base[k] = v
@@ -23,14 +23,14 @@ def deep_update(base, updates):
 # ------------------------------------------------------------
 # Helper: resolve {root} placeholders in paths
 # ------------------------------------------------------------
-def resolve_placeholders(cfg):
+def resolve_placeholders(cfg: dict):
     """Replace {root} placeholders in all path-like config sections."""
     root = cfg["paths"]["root"]
     for section in ["paths", "outputs", "reports", "ingest"]:
         if section in cfg:
             for k, v in cfg[section].items():
                 if isinstance(v, str):
-                    cfg[section][k] = Template(v).safe_substitute(root=root)
+                    cfg[section][k] = v.replace("{root}", root)
     return cfg
 
 # ------------------------------------------------------------
@@ -39,26 +39,32 @@ def resolve_placeholders(cfg):
 def load_config(
     default_path: str = "config/default.yaml",
     local_path: str = "config/local.yaml",
-    root_override: str = None
+    root_override: str = None,
 ):
     """
     Load Leak-Project configuration.
-    1. Loads default.yaml (always required)
-    2. Optionally merges local.yaml (if present)
-    3. Replaces {root} placeholders using:
-       priority = root_override > local.yaml > default.yaml > repo root
-    """
 
+    Steps:
+      1. Load default.yaml (always required)
+      2. Merge local.yaml (if present)
+      3. Determine root path:
+         priority = root_override > $LEAK_ROOT > local.yaml > default.yaml > repo root
+      4. Replace {root} placeholders across config sections
+    """
     default_path = Path(default_path)
     local_path = Path(local_path)
-    cfg = yaml.safe_load(open(default_path))
 
-    # Optional: merge local.yaml
+    # --- 1️⃣ Load default.yaml
+    with open(default_path, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    # --- 2️⃣ Optional: merge local.yaml
     if local_path.exists():
-        local_cfg = yaml.safe_load(open(local_path))
+        with open(local_path, "r") as f:
+            local_cfg = yaml.safe_load(f)
         deep_update(cfg, local_cfg)
 
-    # Determine root path
+    # --- 3️⃣ Determine root
     root = (
         root_override
         or os.environ.get("LEAK_ROOT")
@@ -67,7 +73,7 @@ def load_config(
     )
     cfg["paths"]["root"] = root
 
-    # Replace placeholders
+    # --- 4️⃣ Replace {root} placeholders
     cfg = resolve_placeholders(cfg)
 
     return cfg
@@ -78,5 +84,6 @@ def load_config(
 if __name__ == "__main__":
     cfg = load_config()
     print(f"[config] Using root: {cfg['paths']['root']}")
-    print(f"[config] Raw dir: {cfg['paths'].get('raw_dir')}")
-    print(f"[config] Clean dir: {cfg['paths'].get('clean_dir')}")
+    for key in ["raw_dir", "clean_dir", "derived_dir"]:
+        if key in cfg["paths"]:
+            print(f"[config] {key}: {cfg['paths'][key]}")
