@@ -1,29 +1,9 @@
-# ============================================================
 # pipe/ingest/flag_mail_types.py
-# Typisierung von Mails: Newsletter, Threads, Leermails etc.
-# ============================================================
+import pandas as pd
 
-import re
-
-def flag_mail_types(df):
-    """
-    Fügt Spalte 'content_type' hinzu (newsletter, thread_history, stub, normal, attachment_dump).
-    Diese Klassifikation dient zur Auditierung und Steuerung der Analysezulassung.
-    """
-    def classify(row):
-        text = str(row.get("body_text", "")).lower()
-        subj = str(row.get("subject", "")).lower()
-        sender = str(row.get("sender", "")).lower()
-
-        if len(text.strip()) == 0 or row.get("text_length", 0) < 10:
-            return "empty_or_stub"
-        if "unsubscribe" in text or "eyeforenergy" in sender or "newsletter" in subj:
-            return "newsletter"
-        if "begin 644" in text or "base64" in text:
-            return "attachment_dump"
-        if "-----original message-----" in text or subj.startswith("re:"):
-            return "thread_history"
-        return "normal"
-
-    df["content_type"] = df.apply(classify, axis=1)
+def flag_mail_types(df: pd.DataFrame) -> pd.DataFrame:
+    df["content_type"] = "normal"
+    df.loc[df["subject"].str.contains("unsubscribe|newsletter|offer", case=False, na=False), "content_type"] = "newsletter"
+    df.loc[df["body_text"].str.match(r"^-----Original Message-----", na=False), "content_type"] = "thread_history"
+    df.loc[df["text_length"] < 20, "content_type"] = "empty_or_stub"
     return df

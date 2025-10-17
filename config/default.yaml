@@ -7,6 +7,7 @@ paths:
   levels: "{root}/data_derived/infomap_levels.csv"
   levels_csv: "{root}/data_derived/infomap_levels.csv"  # alias für Kompatibilität
   persons: "{root}/data_derived/persons.csv"
+  events_master: "{root}/data/clean/events_master.csv"
 
 ingest:
   input_subdir: "sample"              # relativ zu paths.raw_dir
@@ -71,3 +72,6 @@ reports:
     cutoffs: "{root}/reports/orgchart/cutoffs"
     viz: "{root}/reports/orgchart/viz"
     pies: "{root}/reports/orgchart/viz/pies"
+
+schemas:
+  events_master: config/schema/events_master.yaml
