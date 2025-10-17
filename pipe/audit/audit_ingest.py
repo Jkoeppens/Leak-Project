@@ -31,15 +31,26 @@ def audit_ingest(cfg=None, per_owner_limit=500, max_owners=3):
     print(f"[INFO] {len(df)} Zeilen geladen aus {output_path}")
 
     # ------------------------------------------------------------
-    # 🔹 2️⃣ Typkorrektur mit Diagnose
+    # 🔹 2️⃣ Typkorrektur mit Diagnostik & Schutz gegen NaN-Floats
     # ------------------------------------------------------------
     if "timestamp" in df:
+        # Alle Werte zu String zwingen, float('nan') -> "nan"
+        df["timestamp"] = df["timestamp"].astype(str)
+
+        # Alle NaN-/leeren Strings entfernen
+        df["timestamp"] = df["timestamp"].replace(
+            {"nan": None, "NaN": None, "": None, "None": None}
+        )
+
+        # Einheitlich parsen
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
-        print("[TYPE] timestamp →", df["timestamp"].dtype, "| NaT:", df["timestamp"].isna().sum())
+
+        print("[TYPE] timestamp →", df["timestamp"].dtype)
+        print("  NaT count:", df["timestamp"].isna().sum())
 
     if "text_length" in df:
         df["text_length"] = pd.to_numeric(df["text_length"], errors="coerce")
-        print("[TYPE] text_length →", df["text_length"].dtype, "| NaN:", df["text_length"].isna().sum())
+        print("[TYPE] text_length →", df["text_length"].dtype)
 
     # ------------------------------------------------------------
     # 🔹 3️⃣ Audit-Berechnung
