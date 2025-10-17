@@ -98,6 +98,87 @@ modules:
           target: outputs.cutoffs_dir
           desc: Histogramm der Kantengewichte
 
+  - name: pipe/hierarchy/dynamic_levels.py
+    purpose: >
+      Baut eine datengetriebene Auswahl von Hierarchie-Clustern auf Basis der in
+      cluster_stats_summary.csv berechneten Statistiken. Leitet daraus Mindestgrößen,
+      Coverage-Ziele und Parent→Child-Beziehungen ab und speichert die Auswahl als JSON.
+      Operationalisiert damit die Ergebnisse der Level-Diagnose für die spätere
+      Visualisierung und Aggregation.
+    io:
+      input:
+        - name: cluster_stats_summary.csv
+          type: csv
+          source: cfg.outputs.cutoffs_dir
+          desc: Statistiken pro Level (xmin, kelbow etc.)
+        - name: levels.csv
+          type: csv
+          source: cfg.paths.levels
+          desc: Hierarchiedatei mit Level-Spalten (level_1, level_2, …)
+      use:
+        - name: pipe.hierarchy.io.load_levels
+          type: function
+          desc: Robustes Laden der Hierarchie-Levelstruktur
+        - name: numpy
+          type: library
+        - name: pandas
+          type: library
+        - name: json
+          type: library
+        - name: pathlib
+          type: library
+      output:
+        - name: selection_dynamic.json
+          type: json
+          target: cfg.outputs.org_dir
+          desc: Auswahl der pro Level zu behaltenden Cluster (IDs, Coverage, min_size)
+        - name: selection_meta.json
+          type: json
+          target: cfg.outputs.org_dir
+          desc: Metadaten der Selektion (Coverage-Werte, Kinderbegrenzung etc.)
+
+  - name: pipe/hierarchy/leaders.py
+    purpose: >
+      Bestimmt zentrale Akteure ("Leaders") in jeder Hierarchieebene anhand
+      gewichteter Betweenness-Centrality. Nutzt dazu die vorbereiteten Edgelisten
+      und die dynamische Level-Struktur. Liefert pro Cluster den Leader sowie
+      globale Executives mit hoher Zentralität.
+    io:
+      input:
+        - name: edges_prepared.csv
+          type: csv
+          source: cfg.paths.data_derived
+          desc: Bereinigte, gefilterte Kommunikationskanten (src, dst, weight)
+        - name: levels.csv
+          type: csv
+          source: cfg.paths.levels
+          desc: Hierarchie-Levels mit Cluster-Zuordnungen (level_1, level_2, …)
+        - name: selection_dynamic.json
+          type: json
+          source: cfg.outputs.org_dir
+          desc: Dynamisch berechnete Cluster-Selektion (aus dynamic_levels.py)
+      use:
+        - name: networkx
+          type: library
+          desc: Berechnung der Betweenness-Centrality
+        - name: numpy
+          type: library
+        - name: pandas
+          type: library
+        - name: json
+          type: library
+        - name: pathlib
+          type: library
+      output:
+        - name: leaders.json
+          type: json
+          target: cfg.outputs.org_dir
+          desc: Vollständige Leader-Struktur (globale Execs + pro Cluster)
+        - name: leaders_flat.csv
+          type: csv
+          target: cfg.outputs.org_dir
+          desc: Tabellarische Übersicht aller Leader pro Level und Cluster
+
   - name: pipe/hierarchy/leader_select.py
     purpose: >
       Wählt Cluster-Leader anhand von Knotendegree und identifiziert globale Executives.
@@ -153,6 +234,54 @@ modules:
           type: csv
           target: outputs.org_dir
           desc: Flache Tabelle aller Cluster-Leader und Execs
+
+  - name: pipe/hierarchy/orgchart_html.py
+    purpose: >
+      Erzeugt ein interaktives Organigramm als HTML-Datei auf Basis der
+      berechneten Hierarchie-, Leader- und Topic-Daten. Visualisiert
+      Cluster-Hierarchien, Leader-Nodes, optionale Themenflüsse und
+      zusätzliche Kanten mithilfe von PyVis.
+    io:
+      input:
+        - name: levels.csv
+          type: csv
+          source: cfg.paths.levels
+          desc: Hierarchieebenen mit Cluster-Zuordnungen (level_1, level_2, …)
+        - name: selection_dynamic.json
+          type: json
+          source: cfg.outputs.org_dir
+          desc: Auswahl der beizubehaltenden Cluster (aus dynamic_levels.py)
+        - name: leaders.json
+          type: json
+          source: cfg.outputs.org_dir
+          desc: Leader-Daten pro Cluster (aus leaders.py)
+        - name: persons.csv
+          type: csv
+          optional: true
+          source: cfg.paths.persons
+          desc: Optionale Personendaten für Label-Ersetzung (E-Mail → Name)
+        - name: extra_edges.json
+          type: json
+          optional: true
+          source: cfg.outputs.org_dir
+          desc: Optionale Zusatzkanten für Themen-/Kommunikationsflüsse
+      use:
+        - name: pyvis
+          type: library
+          desc: Interaktive Netzwerkvisualisierung
+        - name: pandas
+          type: library
+        - name: numpy
+          type: library
+        - name: pathlib
+          type: library
+        - name: json
+          type: library
+      output:
+        - name: organigram_interaktiv.html
+          type: html
+          target: cfg.outputs.org_dir
+          desc: Interaktives HTML-Organigramm mit Leadern, Hierarchie und Themenflüssen
 
   - name: pipe/hierarchy/orgchart_html_topics.py
     purpose: >

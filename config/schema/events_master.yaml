@@ -1,0 +1,109 @@
+# config/schema/events_master.yaml
+name: events_master
+description: >
+  Haupttabelle aller Kommunikationsereignisse (z. B. Mails, Threads, Nachrichten).
+  Enthält alle Metadaten, Teilnehmerinformationen und semantische Zuordnungen (Topics, Leader, Cluster).
+  Jedes Ereignis ist durch event_id eindeutig identifiziert.
+type: table
+version: 1.0
+
+fields:
+
+  - name: event_id
+    type: str
+    required: true
+    unique: true
+    desc: Eindeutige ID des Ereignisses (z. B. aus Dateinamen oder Hash generiert)
+
+  - name: timestamp
+    type: datetime
+    format: "%Y-%m-%d %H:%M:%S"
+    required: true
+    desc: Zeitpunkt des Ereignisses (z. B. Sendezeit der Mail)
+
+  - name: sender
+    type: str
+    desc: Absenderadresse
+
+  - name: recipients
+    type: str
+    desc: Kommagetrennte Liste der Empfängeradressen (TO, CC, BCC zusammengeführt)
+
+  - name: subject
+    type: str
+    desc: Betreffzeile oder Kurzbeschreibung des Ereignisses
+
+  - name: text
+    type: str
+    desc: Volltextinhalt oder bereinigter Body-Text der Mail
+
+  - name: n_words
+    type: int
+    desc: Wortanzahl des bereinigten Textes
+
+  - name: n_participants
+    type: int
+    desc: Anzahl der beteiligten Akteure (Absender + Empfänger)
+
+  - name: thread_id
+    type: str
+    desc: Eindeutige Thread- oder Konversations-ID (zur Gruppierung von Antworten)
+
+  - name: cluster_id
+    type: int
+    desc: Zugehöriger organisationaler Cluster auf feinster Hierarchieebene (z. B. level_3)
+
+  - name: leader_id
+    type: str
+    desc: Führende Person im Cluster (aus leaders.json)
+
+  - name: topic_main
+    type: str
+    desc: Haupt-Topic der Nachricht (höchste Wahrscheinlichkeit oder stärkste Zuordnung)
+
+  - name: topics_json
+    type: json
+    desc: >
+      Liste aller Topics mit zugehöriger Wahrscheinlichkeit (flexible Länge).
+      Beispiel:
+      [{"topic": "Budgeting", "prob": 0.6},
+       {"topic": "Strategy", "prob": 0.3},
+       {"topic": "HR", "prob": 0.1}]
+      Wird als JSON-String gespeichert, z. B. mit json.dumps().
+
+  - name: meta_topic_ids
+    type: str
+    desc: Kommagetrennte Liste der zugehörigen MetaTopics (reduzierte, stabile Oberthemen)
+
+  - name: model_version
+    type: str
+    desc: Identifikator des Topic-Modells (z. B. "2025-10a" für Reproduzierbarkeit)
+
+  - name: z_score
+    type: float
+    desc: Optionaler Z-Score der Aktivität (z. B. Abweichung vom historischen Mittel)
+
+  - name: region
+    type: str
+    desc: Optional, geografische Zuordnung oder organisatorische Einheit
+
+  - name: org_level
+    type: str
+    desc: Hierarchieebene (z. B. "level_1", "level_2", "level_3")
+
+  - name: processed_at
+    type: datetime
+    desc: Zeitstempel des letzten Pipeline-Durchlaufs, der diesen Datensatz erzeugt hat
+
+meta:
+  primary_key: event_id
+  index: [timestamp, cluster_id, topic_main]
+  encoding: utf-8
+  delimiter: ","
+  quotechar: '"'
+  escapechar: "\\"
+  comment: >
+    Enthält für jedes Ereignis den vollständigen Kontext: Kommunikationsmetadaten, semantische
+    Topics, Hierarchiezuordnung und zentrale Kennzahlen. Das Feld topics_json erlaubt
+    flexible Speicherung multipler Topics pro Mail und ist für Analyse und Visualisierung
+    standardisiert serialisiert (JSON list of dicts).

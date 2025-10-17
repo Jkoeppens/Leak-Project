@@ -1,0 +1,543 @@
+modules:
+
+  - name: pipe/config.py
+    purpose: >
+      Lädt YAML-Konfigurationen, merged lokale Overrides und wandelt Pfade in absolute um.
+      Grundlage für alle nachfolgenden Module.
+    io:
+      input: []
+      use:
+        - name: yaml
+          type: library
+          desc: Lädt Konfigurationsdateien
+        - name: pathlib
+          type: library
+          desc: Pfad-Operationen und Pfadprüfung
+      output:
+        - name: cfg_dict
+          type: dict
+          desc: Vollständiges Konfigurationsobjekt mit absoluten Pfaden
+
+  - name: pipe/ingest/ingest_any.py
+    purpose: >
+      Liest E-Mail-Daten (.eml, .mbox, Verzeichnisse) ein und wandelt sie
+      in tabellarische CSV-Dateien für Ereignisse, Akteure und Kommunikationskanten um.
+    io:
+      input:
+        - name: raw_dir
+          type: directory
+          source: cfg.paths.raw_dir
+          desc: Verzeichnis mit Roh-E-Mails
+      use:
+        - name: pipe.config.load_config
+          type: function
+          desc: Lädt und erweitert Konfiguration
+      output:
+        - name: events.csv
+          type: csv
+          target: clean_dir
+          desc: Metadaten jeder Mail
+        - name: event_actor.csv
+          type: csv
+          target: clean_dir
+          desc: Zuordnung Event ↔ Akteur ↔ Rolle
+        - name: edges.csv
+          type: csv
+          target: clean_dir
+          desc: Aggregierte Kommunikationskanten
+
+  - name: pipe/hierarchy/io.py
+    purpose: >
+      Robustes Laden, Filtern und Berichten von Edgelisten und Level-Dateien.
+      Grundlage für alle nachfolgenden Hierarchie-Analysen. Produziert auch outside world markierung.
+    io:
+      input:
+        - name: edges.csv
+          type: csv
+          source: cfg.paths.edges
+          desc: Roh-Edgelist (Kommunikationskanten)
+        - name: levels.csv
+          type: csv
+          source: cfg.paths.levels
+          desc: Hierarchiedaten mit Clusterzuordnung
+      output:
+        - name: data_report.json
+          type: json
+          target: outputs.cutoffs_dir
+          desc: Basisstatistik zum Netzwerk
+        - name: top_degree_nodes.csv
+          type: csv
+          target: outputs.cutoffs_dir
+          desc: Liste der zentralsten Knoten
+        - name: weight_histogram.png
+          type: image
+          target: outputs.cutoffs_dir
+          desc: Histogramm der Kantengewichte
+
+  - name: pipe/hierarchy/prep.py
+    purpose: >
+      Bereitet Edgelisten für alle weiteren Analysen vor, filtert, normalisiert und erstellt Reports.
+    io:
+      input:
+        - name: edges.csv
+          type: csv
+          source: cfg.paths.edges
+          desc: Ursprüngliche Edgelist
+      use:
+        - name: io.py
+          type: module
+          desc: Edge- und Filterfunktionen
+      output:
+        - name: edges_prepared.csv
+          type: csv
+          target: cfg.paths.edges_prepared
+          desc: Bereinigte, gefilterte Edgelist
+        - name: data_report.json
+          type: json
+          target: outputs.cutoffs_dir
+          desc: Basisstatistik
+        - name: hist_weights_prepared.png
+          type: image
+          target: outputs.cutoffs_dir
+          desc: Gewichtshistogramm
+
+  - name: pipe/hierarchy/dynamic_levels.py
+    purpose: >
+      Baut eine datengetriebene Auswahl von Hierarchie-Clustern auf Basis der in
+      cluster_stats_summary.csv berechneten Statistiken. Leitet daraus Mindestgrößen,
+      Coverage-Ziele und Parent→Child-Beziehungen ab und speichert die Auswahl als JSON.
+      Operationalisiert damit die Ergebnisse der Level-Diagnose für die spätere
+      Visualisierung und Aggregation.
+    io:
+      input:
+        - name: cluster_stats_summary.csv
+          type: csv
+          source: cfg.outputs.cutoffs_dir
+          desc: Statistiken pro Level (xmin, kelbow etc.)
+        - name: levels.csv
+          type: csv
+          source: cfg.paths.levels
+          desc: Hierarchiedatei mit Level-Spalten (level_1, level_2, …)
+      use:
+        - name: pipe.hierarchy.io.load_levels
+          type: function
+          desc: Robustes Laden der Hierarchie-Levelstruktur
+        - name: numpy
+          type: library
+        - name: pandas
+          type: library
+        - name: json
+          type: library
+        - name: pathlib
+          type: library
+      output:
+        - name: selection_dynamic.json
+          type: json
+          target: cfg.outputs.org_dir
+          desc: Auswahl der pro Level zu behaltenden Cluster (IDs, Coverage, min_size)
+        - name: selection_meta.json
+          type: json
+          target: cfg.outputs.org_dir
+          desc: Metadaten der Selektion (Coverage-Werte, Kinderbegrenzung etc.)
+
+  - name: pipe/hierarchy/leaders.py
+    purpose: >
+      Bestimmt zentrale Akteure ("Leaders") in jeder Hierarchieebene anhand
+      gewichteter Betweenness-Centrality. Nutzt dazu die vorbereiteten Edgelisten
+      und die dynamische Level-Struktur. Liefert pro Cluster den Leader sowie
+      globale Executives mit hoher Zentralität.
+    io:
+      input:
+        - name: edges_prepared.csv
+          type: csv
+          source: cfg.paths.data_derived
+          desc: Bereinigte, gefilterte Kommunikationskanten (src, dst, weight)
+        - name: levels.csv
+          type: csv
+          source: cfg.paths.levels
+          desc: Hierarchie-Levels mit Cluster-Zuordnungen (level_1, level_2, …)
+        - name: selection_dynamic.json
+          type: json
+          source: cfg.outputs.org_dir
+          desc: Dynamisch berechnete Cluster-Selektion (aus dynamic_levels.py)
+      use:
+        - name: networkx
+          type: library
+          desc: Berechnung der Betweenness-Centrality
+        - name: numpy
+          type: library
+        - name: pandas
+          type: library
+        - name: json
+          type: library
+        - name: pathlib
+          type: library
+      output:
+        - name: leaders.json
+          type: json
+          target: cfg.outputs.org_dir
+          desc: Vollständige Leader-Struktur (globale Execs + pro Cluster)
+        - name: leaders_flat.csv
+          type: csv
+          target: cfg.outputs.org_dir
+          desc: Tabellarische Übersicht aller Leader pro Level und Cluster
+
+  - name: pipe/hierarchy/orgchart_html.py
+    purpose: >
+      Erzeugt ein interaktives Organigramm als HTML-Datei auf Basis der
+      berechneten Hierarchie-, Leader- und Topic-Daten. Visualisiert
+      Cluster-Hierarchien, Leader-Nodes, optionale Themenflüsse und
+      zusätzliche Kanten mithilfe von PyVis.
+    io:
+      input:
+        - name: levels.csv
+          type: csv
+          source: cfg.paths.levels
+          desc: Hierarchieebenen mit Cluster-Zuordnungen (level_1, level_2, …)
+        - name: selection_dynamic.json
+          type: json
+          source: cfg.outputs.org_dir
+          desc: Auswahl der beizubehaltenden Cluster (aus dynamic_levels.py)
+        - name: leaders.json
+          type: json
+          source: cfg.outputs.org_dir
+          desc: Leader-Daten pro Cluster (aus leaders.py)
+        - name: persons.csv
+          type: csv
+          optional: true
+          source: cfg.paths.persons
+          desc: Optionale Personendaten für Label-Ersetzung (E-Mail → Name)
+        - name: extra_edges.json
+          type: json
+          optional: true
+          source: cfg.outputs.org_dir
+          desc: Optionale Zusatzkanten für Themen-/Kommunikationsflüsse
+      use:
+        - name: pyvis
+          type: library
+          desc: Interaktive Netzwerkvisualisierung
+        - name: pandas
+          type: library
+        - name: numpy
+          type: library
+        - name: pathlib
+          type: library
+        - name: json
+          type: library
+      output:
+        - name: organigram_interaktiv.html
+          type: html
+          target: cfg.outputs.org_dir
+          desc: Interaktives HTML-Organigramm mit Leadern, Hierarchie und Themenflüssen
+
+  - name: pipe/patch_events.py
+    purpose: >
+      Führt Events und Event-Actors zusammen, normalisiert E-Mail-Felder,
+      vereinheitlicht Rollen und aggregiert Teilnehmerlisten.
+    io:
+      input:
+        - name: events.csv
+          type: csv
+          source: paths.clean_dir
+          desc: Rohdaten der Events
+        - name: event_actor.csv
+          type: csv
+          source: paths.clean_dir
+          desc: Rollen und Adressen der Akteure
+      use:
+        - name: pandas
+          type: library
+        - name: re
+          type: library
+        - name: json
+          type: library
+      output:
+        - name: events_patched_with_participants.csv
+          type: csv
+          target: paths.clean_dir
+          desc: Events mit aggregierten Teilnehmerdaten
+        - name: console_report
+          type: text
+          desc: Preview (event_id, n_participants, text_len)
+
+  - name: pipe/topics_flow/topics_flow.py
+    purpose: >
+      Führt BERTopic auf bereinigten Thread-Root-Mails aus und erzeugt
+      standardisierte Topic-Ergebnisse (Events, Info, Words, Labels).
+    io:
+      input:
+        - name: events_roots_for_topics.csv
+          type: csv
+          source: paths.clean_dir
+          desc: Bereinigte Thread-Root-Mails mit Texten
+      use:
+        - name: BERTopic
+          type: library
+        - name: sentence_transformers.SentenceTransformer
+          type: library
+        - name: sklearn.feature_extraction.text.CountVectorizer
+          type: library
+        - name: sklearn.cluster.HDBSCAN
+          type: library
+        - name: umap.UMAP
+          type: library
+      output:
+        - name: events_with_topics.csv
+          type: csv
+          target: outputs.topics_dir
+          desc: Topic-Zuordnung je Event
+        - name: topic_info.csv
+          type: csv
+          target: outputs.topics_dir
+          desc: Übersicht der erkannten Topics
+        - name: topic_words.csv
+          type: csv
+          target: outputs.topics_dir
+          desc: Top-Wörter pro Topic
+        - name: topic_info_labels.csv
+          type: csv
+          target: outputs.topics_dir
+          desc: Kurzlabels für Topics
+        - name: topic_probabilities.npy
+          type: npy
+          target: outputs.topics_dir
+          optional: true
+          desc: Wahrscheinlichkeiten pro Topic-Zuordnung
+        - name: console_report
+          type: text
+          desc: Anzahl Topics, Noise-Cluster, Laufzeit
+
+  - name: pipe/reduce_topics.py
+    purpose: >
+      Reduziert BERTopic-Ergebnisse auf MetaTopics mithilfe Agglomerative Clustering
+      auf Basis der Wortvektoren.
+    io:
+      input:
+        - name: events_with_topics.csv
+          type: csv
+          source: outputs.topics_dir
+        - name: topic_info.csv
+          type: csv
+          source: outputs.topics_dir
+        - name: topic_words.csv
+          type: csv
+          source: outputs.topics_dir
+      use:
+        - name: pandas
+          type: library
+        - name: numpy
+          type: library
+        - name: sklearn.cluster.AgglomerativeClustering
+          type: library
+        - name: sklearn.metrics.pairwise.cosine_distances
+          type: library
+      output:
+        - name: topic_map_old_to_meta.csv
+          type: csv
+          target: outputs.topics_dir/reduced
+        - name: events_with_metatopics.csv
+          type: csv
+          target: outputs.topics_dir/reduced
+        - name: topic_info_meta.csv
+          type: csv
+          target: outputs.topics_dir/reduced
+
+  - name: pipe/label_metatopics.py
+    purpose: >
+      Erzeugt automatische Labels für MetaTopics mithilfe c-TF-IDF.
+      Erstellt Label-Listen, Zuordnungstabellen und erweiterte MetaTopic-Infos.
+    io:
+      input:
+        - name: events_with_metatopics.csv
+          type: csv
+          source: outputs.topics_dir/reduced
+          desc: Events mit MetaTopics
+        - name: topic_info_meta.csv
+          type: csv
+          source: outputs.topics_dir/reduced
+          desc: Basisinformationen der MetaTopics
+      use:
+        - name: pandas
+          type: library
+        - name: numpy
+          type: library
+        - name: re
+          type: library
+        - name: sklearn.feature_extraction.text.CountVectorizer
+          type: library
+        - name: sklearn.feature_extraction.text.TfidfTransformer
+          type: library
+      output:
+        - name: meta_labels_auto.csv
+          type: csv
+          target: outputs.topics_dir/reduced
+          desc: Alle automatisch extrahierten Labelkandidaten
+        - name: meta_topic_label_map.csv
+          type: csv
+          target: outputs.topics_dir/reduced
+          desc: Zuordnung MetaTopic → primäres Label
+        - name: topic_info_meta_labeled.csv
+          type: csv
+          target: outputs.topics_dir/reduced
+          desc: Erweiterte MetaTopic-Infos mit Labels
+        - name: console_report
+          type: text
+          desc: Spaltenerkennung, Label-Vorschau
+            
+  - name: pipe/topics_flow/topic_flows_between_clusters.py
+    purpose: >
+      Erzeugt Topic-Flüsse zwischen Clustern basierend auf Events,
+      Event-Akteuren und Hierarchie-Leveln.
+    io:
+      input:
+        - name: events.csv
+          type: csv
+          source: paths.clean_dir
+        - name: event_actor.csv
+          type: csv
+          source: paths.clean_dir
+        - name: infomap_levels.csv
+          type: csv
+          source: paths.levels_csv
+        - name: events_with_thread_topics.csv
+          type: csv
+          source: outputs.org_dir
+      use:
+        - name: pandas
+          type: library
+      output:
+        - name: topic_flows.csv
+          type: csv
+          target: outputs.org_dir
+          desc: Aggregierte Topic-Flüsse zwischen Clustern
+
+  - name: pipe/topics_flow/cluster_topic_pies.py
+    purpose: >
+      Erzeugt Topic-Verteilungen pro organisationalem Cluster basierend auf der Hierarchie.
+      Unterstützt periodische und rollende Zeitaggregation.
+    io:
+      input:
+        - name: events_with_topics.csv
+          type: csv
+          source: outputs.topics_dir
+          desc: Ereignisse mit zugeordneten Topics
+        - name: infomap_levels.csv
+          type: csv
+          source: paths.levels_csv
+          desc: Hierarchieebenen der Organisation
+      use:
+        - name: pandas
+          type: library
+        - name: numpy
+          type: library
+        - name: pipe.topics_flow.utils.export_cluster_pies
+          type: function
+          desc: Optionaler grafischer Pie-Export
+      output:
+        - name: cluster_topic_pies.csv
+          type: csv
+          target: outputs.org_dir
+          desc: Topic-Verteilungen pro Cluster
+        - name: cluster_topic_pies_summary.csv
+          type: csv
+          target: outputs.org_dir
+          desc: Aggregierte Zusammenfassung der Topic-Verteilungen
+        - name: viz/pies/
+          type: directory
+          target: outputs.org_dir
+          desc: Optionaler Ordner mit grafischen Mini-Pies
+
+  - name: pipe/topics_flow/prepare_topic_colors_and_edges.py
+    purpose: >
+      Erzeugt farbkodierte Topic-Kanten und Knotenlisten für Netzwerkvisualisierung.
+      Erkennt automatisch alte und neue Flussschemata.
+    io:
+      input:
+        - name: topic_flows_filtered.csv
+          type: csv
+          source: outputs.org_dir
+          desc: Gefilterte Topic-Flussdaten
+        - name: cluster_topic_pies_summary.csv
+          type: csv
+          source: outputs.org_dir
+          desc: Clusterbezogene Topic-Verteilungen
+      use:
+        - name: pandas
+          type: library
+        - name: numpy
+          type: library
+        - name: matplotlib.colormaps
+          type: library
+      output:
+        - name: edges_topics.csv
+          type: csv
+          target: outputs.org_dir/viz
+        - name: nodes_topics.csv
+          type: csv
+          target: outputs.org_dir/viz
+        - name: topic_colors.csv
+          type: csv
+          target: outputs.org_dir/viz
+        - name: console_report
+          type: text
+          desc: Edges-, Nodes-, Topics-Zählung
+
+  - name: pipe/topics_flow/utils.py
+    purpose: >
+      Hilfsfunktionen für grafische Exporte.
+      Erzeugt Pie-Chart-Bilder und Indexdateien pro Cluster.
+    io:
+      input:
+        - name: pies
+          type: dataframe
+          desc: Cluster-Topic-Verteilungen mit Anteilen
+      use:
+        - name: matplotlib.pyplot
+          type: library
+        - name: pandas
+          type: library
+      output:
+        - name: viz/pies/<cluster_id>.png
+          type: image
+          target: outputs.org_dir/viz/pies
+        - name: cluster_pies_index.csv
+          type: csv
+          target: outputs.org_dir/viz/pies
+          desc: Indexdatei mit Pfaden zu Pie-Bildern
+
+  - name: pipe/vis_org_topics.py
+    purpose: >
+      Erzeugt interaktive HTML-Netzwerke, in denen Clusterknoten
+      thematische Pie-Icons tragen und Topic-Kanten farbkodiert angezeigt werden.
+    io:
+      input:
+        - name: nodes_topics.csv
+          type: csv
+          source: reports.orgchart/viz
+          desc: Knotendaten mit Topic-Anteilen
+        - name: edges_topics.csv
+          type: csv
+          source: reports.orgchart/viz
+          desc: Kanten zwischen Clustern (Themenflüsse)
+        - name: pies/
+          type: directory
+          source: reports.orgchart/viz/pies
+          desc: PNG-Pie-Icons je Cluster
+      use:
+        - name: pyvis.network.Network
+          type: library
+        - name: pandas
+          type: library
+        - name: numpy
+          type: library
+      output:
+        - name: org_topics_hier.html
+          type: html
+          target: reports.orgchart/viz
+          desc: Interaktive hierarchische Netzwerkvisualisierung
+        - name: console_report
+          type: text
+          desc: Anzahl Nodes, Edges, Filterstatistik
+
+
+        
