@@ -48,7 +48,7 @@ for k in ("raw_dir", "clean_dir"):
 # 3️⃣ Ingest starten
 # ------------------------------------------------------------
 print("\n[STEP] Ingest-Lauf startet …")
-output_path = ingest_core(cfg, sample_limit=None)
+output_path = ingest_core(cfg, per_owner_limit=500, max_owners=3)
 
 CLEAN_DIR = Path(cfg["paths"]["clean_dir"])
 output_path = Path(output_path)
