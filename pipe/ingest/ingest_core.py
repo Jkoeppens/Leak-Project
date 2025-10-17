@@ -51,6 +51,24 @@ def ingest_core(cfg, sample_limit=None):
     print(f"[Ingest] Clean output : {clean_dir}")
 
     # --- alle Maildateien suchen ---
+    # --- alle Maildateien suchen ---
+def _is_mail_file(p: Path):
+    """Filtert echte Text-Mails heraus (.mbox, ohne Endung, keine versteckten Dateien)."""
+    if p.name.startswith("."):  # versteckte Dateien (z. B. .DS_Store)
+        return False
+    if p.suffix.lower() in {".mbox", ".eml", ".txt"}:
+        return True
+    if p.suffix == "":  # dateien ohne Endung → typische Enron-Mails
+        # schnelle Heuristik: enthalten sie "From:" oder "Subject:"?
+        try:
+            with open(p, "r", errors="ignore") as f:
+                head = f.read(500)
+            return ("From:" in head) and ("Subject:" in head)
+        except Exception:
+            return False
+    return False
+
+files = [p for p in raw_dir.rglob("*") if _is_mail_file(p)]
     files = [p for p in raw_dir.rglob("*") if p.is_file()]
     if sample_limit:
         files = files[:sample_limit]
