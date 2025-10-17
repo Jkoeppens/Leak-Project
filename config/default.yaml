@@ -46,6 +46,7 @@ thresholds:
   pct_l3: 98.0
   z_min_l3_for_plot: 0.0
   n_execs: 8
+  long_mail: 100000   # Zeichenlänge ab der eine Mail als 'long_mail' gilt
 
 runtime:
   random_seed: 42
