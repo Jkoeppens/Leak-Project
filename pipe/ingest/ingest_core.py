@@ -28,7 +28,7 @@ def _is_mail_file(p: Path):
     return False
 
 
-def ingest_core_v3(cfg, per_owner_limit=500, max_owners=None):
+def ingest_core(cfg, per_owner_limit=500, max_owners=None):
     """Ingest pro Benutzer, limitiert, mit Typisierung und Audit-Ausgabe."""
     raw_dir = Path(cfg["paths"]["raw_dir"])
     clean_dir = Path(cfg["paths"]["clean_dir"])
