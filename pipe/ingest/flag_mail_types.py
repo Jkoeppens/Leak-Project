@@ -50,7 +50,7 @@ def flag_mail_types(df: pd.DataFrame) -> pd.DataFrame:
     ] = "thread_history"
 
     # --- 4️⃣ Long Mail (NEU)
-    LONG_THRESHOLD = 100_000
+    LONG_THRESHOLD = 10_000
     df.loc[
         df["text_length"] > LONG_THRESHOLD,
         "content_type"
