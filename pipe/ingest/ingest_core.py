@@ -16,6 +16,7 @@ try:
 except ImportError:
     flag_mail_types = None  # Fallback für isolierte Tests
 
+
 # ============================================================
 # 1️⃣ Helper: {root}-Placeholder-Absicherung
 # ============================================================
@@ -33,7 +34,26 @@ def _resolve_paths_inplace(cfg: dict):
 
 
 # ============================================================
-# 2️⃣ Hauptfunktion: ingest_core
+# 2️⃣ Helper: Mail-Filter
+# ============================================================
+def _is_mail_file(p: Path) -> bool:
+    """Filtert echte Text-Mails heraus (.mbox, ohne Endung, keine versteckten Dateien)."""
+    if p.name.startswith("."):  # versteckte Dateien (z. B. .DS_Store)
+        return False
+    if p.suffix.lower() in {".mbox", ".eml", ".txt"}:
+        return True
+    if p.suffix == "":  # dateien ohne Endung → typische Enron-Mails
+        try:
+            with open(p, "r", errors="ignore") as f:
+                head = f.read(500)
+            return ("From:" in head) and ("Subject:" in head)
+        except Exception:
+            return False
+    return False
+
+
+# ============================================================
+# 3️⃣ Hauptfunktion: ingest_core
 # ============================================================
 def ingest_core(cfg, sample_limit=None):
     """
@@ -50,35 +70,19 @@ def ingest_core(cfg, sample_limit=None):
     print(f"[Ingest] Using RAW dir: {raw_dir}")
     print(f"[Ingest] Clean output : {clean_dir}")
 
-    # --- alle Maildateien suchen ---
-    # --- alle Maildateien suchen ---
-def _is_mail_file(p: Path):
-    """Filtert echte Text-Mails heraus (.mbox, ohne Endung, keine versteckten Dateien)."""
-    if p.name.startswith("."):  # versteckte Dateien (z. B. .DS_Store)
-        return False
-    if p.suffix.lower() in {".mbox", ".eml", ".txt"}:
-        return True
-    if p.suffix == "":  # dateien ohne Endung → typische Enron-Mails
-        # schnelle Heuristik: enthalten sie "From:" oder "Subject:"?
-        try:
-            with open(p, "r", errors="ignore") as f:
-                head = f.read(500)
-            return ("From:" in head) and ("Subject:" in head)
-        except Exception:
-            return False
-    return False
-
-files = [p for p in raw_dir.rglob("*") if _is_mail_file(p)]
-if sample_limit:
-    files = files[:sample_limit]
-print(f"[Ingest] {len(files)} Dateien gefunden\n")
+    # --- Sammle alle Mail-Dateien ---
+    files = [p for p in raw_dir.rglob("*") if _is_mail_file(p)]
+    if sample_limit:
+        files = files[:sample_limit]
+    print(f"[Ingest] {len(files)} Dateien gefunden\n")
 
     # --- Container für Ergebnisse ---
-records = []
+    records = []
 
+    # --- Parsing-Schleife ---
     for path in tqdm(files, desc="Parsing mails"):
         try:
-            text = Path(path).read_text(errors="ignore")
+            text = path.read_text(errors="ignore")
             if not text.strip():
                 continue
 
